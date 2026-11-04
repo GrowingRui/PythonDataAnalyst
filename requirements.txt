@@ -1,0 +1,7 @@
+# Runtime dependencies for the python-data-analyst skill scripts.
+# Minimum versions are the oldest we support; newer versions are fine.
+pandas>=2.1
+numpy>=1.26
+matplotlib>=3.8
+seaborn>=0.13
+openpyxl>=3.1   # needed only for reading .xlsx / .xlsm files
