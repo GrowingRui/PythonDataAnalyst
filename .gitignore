@@ -18,3 +18,7 @@ Thumbs.db
 
 # Claude Code personal settings (per machine, never shared)
 .claude/settings.local.json
+
+# Trigger test runs: keep only the Markdown summaries
+evals/results/*
+!evals/results/*.md

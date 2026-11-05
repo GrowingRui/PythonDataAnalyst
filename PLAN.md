@@ -185,7 +185,124 @@ Also:
 **Done when:** SKILL.md passes the standard check, the plugin installs in Claude Code, and all tests pass.
 
 ### Later candidates (not planned yet)
-A trial in a second agent when one is available; a cleaning script that applies approved steps and writes a change log; a time-trend chart for date columns; a `--target` option for group comparisons; repeatable trigger tests; Parquet/JSON input; plugin packaging.
+A trial in a second agent when one is available. (Plugin packaging was done in Phase 9; the other candidates are now Phases 10–14 below.)
+
+---
+
+## Phases 10–14: approved 2026-11-05 (order and recommended decisions)
+
+Order: trigger tests come first, because every later phase changes `SKILL.md`, and a changed description can change when the skill triggers. Then the small change to input formats, then two analysis features, then the cleaning script, the biggest change to how the skill behaves. Each phase raises the version by one minor step (1.2.0, 1.3.0, ...) in both `SKILL.md` and `plugin.json`, so plugin users get the update.
+
+## Phase 10: Repeatable trigger tests ✅
+
+**Goal:** the Phase 7 trigger checks become a suite you can re-run after every change to `SKILL.md`.
+
+- `evals/triggers.json`: about 24 prompts, each with the expected result:
+  - **should trigger** (~12): plain requests ("what's wrong with sales.csv?"), indirect ones ("can I trust these numbers?" with a CSV attached), Excel and sheet names, a non-English request
+  - **should not trigger** (~12), mostly near misses: "write a SQL query", "plot a sine wave", "fix this pandas error", "convert this CSV to JSON", "explain what a p-value is", a request about a Python web app
+- A runner that starts a headless Claude Code session per prompt in a throwaway config with the plugin installed and records whether the skill was loaded. First check whether `claude plugin eval` already does this; write our own small script (`evals/run_triggers.py`) only if it doesn't.
+- The result goes to `evals/results/<date>.md` (pass rate per group plus every miss), so changes to the description can be compared.
+- If results vary between runs, each prompt runs 3 times and counts as passed only on a majority.
+
+**You will learn:** how skill descriptions are matched to requests, and false positives vs. false negatives.
+
+**Decision (approved):** run it **manually**, before each release, not in CI.
+
+**Done when:** the suite runs with one command and the current description passes at least 11 of 12 in each group.
+
+## Phase 11: Parquet and JSON input ⬜
+
+**Goal:** the skill reads `.parquet`, `.json` and `.jsonl` files as well as CSV and Excel.
+
+- `load_dataset()` gains:
+  - **Parquet** via `pd.read_parquet`. That needs `pyarrow`. Like openpyxl for Excel, it's needed only for that format, and the error explains how to install it.
+  - **JSON:** an array of records, or JSON Lines (`.jsonl`, one record per line). Nested objects are flattened into `parent.child` columns with `pd.json_normalize`, and the overview says which columns came from flattening. Lists inside records stay as they are and are reported as a type problem (a column of lists can't be summarised).
+  - Clear errors for JSON that isn't table-shaped (e.g. a single object of settings).
+- `--json-path` for records nested under a key (e.g. `{"data": {"orders": [...]}}` → `--json-path data.orders`).
+- Parquet keeps its stored types, so fewer "numbers stored as text" findings appear. Tests check that this is reported correctly, not misread as "no problems".
+- SKILL.md description, README, `requirements*.txt` (pyarrow as optional) and the CI minimum-versions job updated.
+
+**You will learn:** columnar vs. row-based formats, why Parquet keeps types and CSV doesn't, and nested data.
+
+**Decision needed (changes D6):** add `pyarrow` as an **optional** dependency (recommended; it's the standard Parquet library for pandas), or leave out Parquet and do JSON only (no new dependency).
+
+**Done when:** the same sample data saved as Parquet, JSON and JSONL gives the same findings as the CSV, apart from the type problems that Parquet keeps from happening at all.
+
+## Phase 12: Time trends for date columns ⬜
+
+**Goal:** for data with dates, show how it changes over time and find problems that only show up in time order.
+
+- `time_summary()` for every datetime column, and for dates stored as text (parsed in memory only, with the day/month order the quality check detected, and labelled as such):
+  - a period size chosen automatically (day / week / month / quarter / year) so the chart has roughly 12–120 points
+  - row count per period, plus the median of the most relevant numeric column (the `--target` column once Phase 13 exists)
+- New chart: a line chart of rows per period, with empty periods marked and partial first and last periods drawn as dashed lines (a half-finished month looks like a drop).
+- New finding rules:
+  - `date_gaps`: empty periods inside the range (possibly missing data)
+  - `partial_period`: the first or last period is incomplete
+  - `implausible_dates`: dates in the future, or placeholder dates such as `1900-01-01` and `1970-01-01`
+  - `date_spike`: a period with far more rows than usual (e.g. a duplicate import)
+- `--date-column` to choose the column when there are several, and `--period` to override the automatic size.
+- Sample data: add a planted gap and a spike to `make_sample_data.py`, and add both to its answer key.
+- A section on trends and seasonality in `visualization-guide.md`, including why a trend isn't a forecast.
+
+**You will learn:** resampling, partial periods, and why seasonality makes month-on-month comparisons misleading.
+
+**Done when:** the planted gap, spike and future date in the sample data are found, and data without dates produces no time section and no error.
+
+## Phase 13: `--target` for group comparisons ⬜
+
+**Goal:** answer "what goes with higher X?". The user names one column, and the analysis is centred on it.
+
+- `--target COL`:
+  - **numeric target** (e.g. `revenue`): for each categorical column, the count, median, mean and IQR per group (top N groups, the rest as "Other"); for each numeric column, Spearman and Pearson correlation with the target, ranked
+  - **categorical target** (e.g. `churned` yes/no, at most ~10 classes): the rate of each class per group, and the numeric columns compared across classes (medians)
+- New charts: box plots of the target by group (sorted by median, with n per group) for the strongest 3 categorical columns; for a categorical target, a bar chart of rates per group.
+- Safeguards in the report:
+  - groups with fewer than 30 rows are marked "too small to compare"
+  - a `possible_leakage` finding when a column predicts the target almost perfectly (e.g. `revenue` vs. `revenue_eur`, or a status set after the outcome)
+  - rows where the target is missing are counted and left out, and the report says so
+  - the limitations section states that group differences aren't causes and that no significance tests were run
+- The report gets a new section 4b, "Target comparison", only when `--target` is used. The 7 standard sections stay as they are.
+
+**You will learn:** comparing groups fairly, why medians beat means for skewed targets, small-group noise, Simpson's paradox and target leakage.
+
+**Decision needed:** **descriptive only** (recommended: no new dependency, and nobody reads a p-value as proof) or also **significance tests** (Kruskal–Wallis, chi-square). Those need SciPy, or our own implementation of the tests, which is more code to get right.
+
+**Done when:** on the sample data `--target revenue` ranks the region and product differences planted in `make_sample_data.py` correctly, and flags a planted leaky column.
+
+## Phase 14: Cleaning script with a change log ⬜
+
+**Goal:** approved cleaning steps are applied by tested code, not ad-hoc pandas, and every change is recorded. This finishes golden rule 2: flag → explain → approve → apply to a **new** file → check.
+
+- `scripts/clean_data.py <dataset> --plan plan.json --output cleaned.csv`
+- `plan.json` is a list of steps from a fixed set, each tied to the finding `rule` it fixes:
+
+  | Step | Fixes |
+  |---|---|
+  | `drop_exact_duplicates` (keep first) | exact duplicate rows |
+  | `drop_duplicate_keys` (keep first / last / most complete) | repeated keys |
+  | `placeholders_to_missing` | `-`, `unknown`, `999`, ... |
+  | `strip_whitespace`, `normalize_labels` (an explicit mapping, e.g. `north` → `North`) | untrimmed and inconsistent labels |
+  | `to_numeric` (currency, %, decimal comma), `to_datetime` (day/month order) | numbers and dates stored as text |
+  | `drop_columns` | empty or constant columns |
+  | `drop_rows_missing` (in given columns) | missing values |
+  | `fill_missing` (median / mode / constant, always adds a `<col>_was_missing` column) | missing values |
+  | `cap_outliers` (to the IQR fences) or `flag_outliers` (adds a column, changes nothing) | outliers |
+
+- **Dry run by default:** it prints what each step would change (rows and values affected, examples) and writes nothing. `--apply` writes the file.
+- Safeguards: it refuses to write over the input or into a non-empty folder, checks the input's SHA-256 before and after, and stops with a clear error if a step names a column that doesn't exist.
+- Writes `cleaning_log.md` (readable) and `cleaning_log.json` next to the output: every step with counts before and after, the SHA-256 of input and output, and the plan itself, so the cleaned file can be rebuilt exactly.
+- SKILL.md Step 6 becomes: write `plan.json` from the options the user approved → show the dry run → apply after a second "yes" → run the EDA on the cleaned file and report what changed (findings that went away, findings that are new).
+- `data-cleaning.md`: each section points to its step name.
+- Tests: every step against known answers, a full plan on the sample data that fixes the planted problems and nothing else, a dry run that writes no files, and the same plan run twice gives byte-identical output.
+
+**You will learn:** reproducible cleaning, why imputation needs an indicator column, and how capping outliers changes the mean and standard deviation.
+
+**Decisions needed:**
+- **Output format:** always CSV (simplest), or the same format as the input (Excel and Parquet outputs need extra code and care with sheets and types). Recommendation: CSV, plus Parquet once Phase 11 exists.
+- **Free-form steps:** only the fixed set above (recommended: every step is tested), or also a `custom_pandas` step for one-off fixes, logged but not tested.
+
+**Done when:** the full flag → approve → dry run → apply → re-check cycle works on the sample data in a real Claude Code session, and the input file is unchanged.
 
 ---
 
@@ -204,3 +321,6 @@ A trial in a second agent when one is available; a cleaning script that applies 
 - 2026-11-05: Phase 7 committed and pushed. Phase 8 built: `README.md` (what it does, install per project or per user, usage, output, sample data, design, methods and limitations, development) with three chart images in `docs/images/`, `LICENSE` (MIT, © 2026 GrowingRui) and `.github/workflows/tests.yml`. Additions beyond the plan: a Windows test run, and a job that tests the oldest versions `requirements.txt` promises (pandas 2.1, NumPy 1.26, Matplotlib 3.8). Running those locally found a real difference: pandas 2 reports skewness 0 for a constant column, so `inspect_data.py` now decides that case itself; the guide examples, written for pandas 3 and Matplotlib 3.10+, are skipped on older versions. 164 passing tests (159 + 4 skipped on minimum versions). Approved, committed and pushed.
 - 2026-11-05: Phase 9 approved (D9: neutral `skills/` folder plus a Claude Code plugin; only Claude Code available for trials). Built: skill moved to `skills/python-data-analyst/`; SKILL.md frontmatter reduced to standard fields (`argument-hint` removed, `license`, `compatibility` and `metadata` added, version 1.1.0) and its text made agent-neutral (no `$ARGUMENTS`, a fallback for agents that can't view images); `.claude-plugin/plugin.json` and `marketplace.json` (marketplace `growingrui-data-skills`); `AGENTS.md`; README install section per agent; CI job `skill-format` running `skills-ref` and `claude plugin validate`; `tests/test_portability.py` (8 tests). Found and fixed on the way: SKILL.md told agents to `pip install -r requirements.txt`, a file that isn't part of an installed skill; it now lists the packages, and a test keeps them in step with `requirements.txt`. Checked: the official skill validator passes (it rejected `argument-hint` before the change), `claude plugin validate .` passes, the plugin installs into a throwaway Claude Code config and lists 1 skill (~110 tokens per session), and the EDA runs from the installed copy. 172 passing tests. Not tested: other agents and the third-party `npx skills` installer (blocked from running here).
 - 2026-11-05: Phase 9 approved, committed and pushed.
+- 2026-11-05: Phases 10-14 proposed (trigger tests, Parquet/JSON input, time trends, `--target`, cleaning script). Waiting for approval and the open decisions.
+- 2026-11-05: Phases 10-14 approved with the recommended decisions. Phase 10 built: `claude plugin eval` (Claude Code 2.1.318) already runs this kind of test, so there's no own runner, only `evals/make_cases.py` (one list of 12 should-trigger and 12 should-not prompts, generating one `case.yaml` per case with a `tool_used: Skill` grader) and `evals/run_triggers.py` (runs the suite and writes `evals/results/<date>-triggers.md`). Prompts that name a file get it in their sandbox: the eval tool only runs a scaffold script inside the case folder, so the generator copies `setup.sh` and the file from `evals/_fixtures/` into each case, and `tests/test_evals.py` (30 tests, no API needed) checks the copies and cases match the generator. Runs are capped at 3 turns with read-only tools, and `--ablation none` (no without-plugin arm, it can't trigger anyway). First full run: 12 of 12 in both groups, 72 of 72 runs right, 5 minutes, priced at $5.78 (counted against the Pro subscription, not billed). Fixed on the way: the summary crashed when printed on a Windows console (the ≥ sign). The version wasn't raised: nothing in the skill changed. 202 passing tests.
+- 2026-11-05: Phase 10 approved, committed and pushed. Phase 11 postponed by the user.

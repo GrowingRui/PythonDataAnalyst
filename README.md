@@ -290,6 +290,12 @@ The test suite covers:
 - the skill format: standard fields only, no agent-specific features, and a
   copied skill folder that runs on its own.
 
+Separately, [`evals/`](evals/README.md) holds trigger tests: 24 prompts that
+check the skill loads when it should and stays out of unrelated requests. They
+run real Claude Code sessions, so they cost usage and aren't part of CI. Run
+them with `python evals/run_triggers.py` after changing the skill's
+description.
+
 To use your working copy in Claude Code while you develop, add this repository
 as a local marketplace (`/plugin marketplace add ./`) and install the plugin
 from it; edits take effect after `/reload-plugins`.

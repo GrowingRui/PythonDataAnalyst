@@ -1,2 +1,7 @@
 # Keep CSV files byte-identical on every OS (sample data is regenerated and compared)
 *.csv text eol=lf
+# Shell scripts must keep LF endings, or bash fails on a Windows checkout
+*.sh text eol=lf
+# Generated eval cases are compared byte-for-byte with evals/make_cases.py
+evals/**/case.yaml text eol=lf
+*.xlsx binary
