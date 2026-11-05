@@ -230,6 +230,14 @@ order: with `03/04/2025` both readings are valid and the wrong one silently
 shifts dates. `inspect_data.py` reports `date_order` when the values settle
 it (a day above 12 appears); otherwise ask the user.
 
+Time zones: when every value carries one (`2025-10-01T10:00:00Z`,
+`+02:00`, `UTC`), the step converts them to UTC and drops the zone, so
+rows from different zones compare correctly and the CSV keeps them. Tell
+the user that local clock times are gone (10:00+02:00 becomes 08:00). If
+local time matters (e.g. "orders by hour of day"), keep the original
+column as well. A column that mixes zoned and plain times is refused,
+because nobody knows which zone the plain ones are in.
+
 ### Mixed types
 
 Finding rule: `mixed_types`.

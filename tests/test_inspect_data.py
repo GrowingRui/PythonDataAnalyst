@@ -291,3 +291,14 @@ def test_cli_error_exit_code(scripts_dir, tmp_path):
     assert r.returncode == 2
     assert "File not found" in r.stderr
     assert "Traceback" not in r.stderr
+
+
+@pytest.mark.parametrize("values", [
+    ["2025-10-01T10:00:00Z", "2025-10-02T11:30:00Z", "2025-10-03T12:00:00Z"] * 5,
+    ["2025-10-01T10:00:00+02:00", "2025-10-02T11:00:00-05:00", "2025-10-03 12:00:00"] * 5,
+], ids=["utc-z", "mixed-offsets"])
+def test_timestamps_with_time_zones_are_found_as_dates(values):
+    # These crashed the type check before Phase 15 (tz-aware values in a tz-naive Series).
+    df = pd.DataFrame({"t": values})
+    issues = describe_dataset(df)["quality"]["type_issues"]
+    assert [(i["column"], i["issue"]) for i in issues] == [("t", "dates_as_text")]

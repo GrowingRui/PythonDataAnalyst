@@ -584,6 +584,20 @@ def step_to_numeric(df: pd.DataFrame, p: dict[str, Any]) -> tuple[pd.DataFrame, 
                  "columns": per_column, "notes": notes}
 
 
+# A time zone at the end of a value with a time: 2025-10-01T10:00:00Z, ...+02:00, ... -0500, ... UTC.
+ZONE_PATTERN = r"\d{1,2}:\d{2}(?::\d{2}(?:\.\d+)?)?\s*(?:Z|UTC|GMT|[+-]\d{2}(?::?\d{2})?)$"
+# ISO dates, also with a time zone; parsed apart from day-first values.
+ISO_ZONED_PATTERN = ISO_DATE_PATTERN[:-1] + r"(?:\s*(?:Z|UTC|GMT|[+-]\d{2}(?::?\d{2})?))?$"
+
+
+def _to_naive_utc(parsed: pd.Series | pd.DatetimeIndex) -> pd.Series:
+    """Dates with a time zone as UTC without the zone, so all rows compare and CSV round-trips."""
+    parsed = pd.Series(parsed)
+    if getattr(parsed.dt, "tz", None) is not None:
+        parsed = parsed.dt.tz_convert("UTC").dt.tz_localize(None)
+    return parsed.astype("datetime64[ns]")
+
+
 def step_to_datetime(df: pd.DataFrame, p: dict[str, Any]) -> tuple[pd.DataFrame, dict[str, Any]]:
     cols = p["columns"]
     _need(df, cols)
@@ -613,26 +627,41 @@ def step_to_datetime(df: pd.DataFrame, p: dict[str, Any]) -> tuple[pd.DataFrame,
                                 "\"%d/%m/%Y\".")
             day_first = order == "day-first"
             how = f"detected {order}" if order else "unambiguous values (e.g. ISO 2025-12-31)"
+        zoned = unique.str.contains(ZONE_PATTERN, case=False, regex=True)
+        if zoned.any() and not zoned.all():
+            raise PlanError(
+                f"{c!r} mixes values with a time zone (e.g. {unique[zoned].iloc[0]!r}) and without one "
+                f"(e.g. {unique[~zoned].iloc[0]!r}), so the zone of the second kind is unknown. Fix those by "
+                "hand first (pandas, outside the log), or leave the column as text.")
+        utc = bool(zoned.any())
         try:
             if fmt:
-                parsed_unique = pd.to_datetime(unique, format=fmt, errors="coerce")
+                parsed_unique = _to_naive_utc(pd.to_datetime(unique, format=fmt, errors="coerce", utc=utc))
+                parsed_unique.index = unique.index
             else:
                 # dayfirst would misread ISO dates (2025-01-02 as 1 February), so they are parsed apart.
-                iso = unique.str.match(ISO_DATE_PATTERN)
+                iso = unique.str.match(ISO_ZONED_PATTERN)
                 parsed_unique = pd.Series(pd.NaT, index=unique.index, dtype="datetime64[ns]")
                 if iso.any():
-                    parsed_unique[iso] = pd.to_datetime(unique[iso], format="ISO8601", errors="coerce")
+                    parsed_unique[iso] = _to_naive_utc(
+                        pd.to_datetime(unique[iso], format="ISO8601", errors="coerce", utc=utc)).to_numpy()
                 if (~iso).any():
-                    parsed_unique[~iso] = pd.to_datetime(unique[~iso], format="mixed", dayfirst=bool(day_first),
-                                                         errors="coerce")
-        except (ValueError, TypeError) as exc:  # e.g. a mix of time zones
+                    parsed_unique[~iso] = _to_naive_utc(
+                        pd.to_datetime(unique[~iso], format="mixed", dayfirst=bool(day_first),
+                                       errors="coerce", utc=utc)).to_numpy()
+        except (ValueError, TypeError) as exc:
             raise PlanError(f"{c!r} can't be parsed as one kind of date: {exc}") from exc
+        if utc:
+            how += "; time zones converted to UTC and dropped"
+            notes.append(f"{c} had time zones: every value was converted to UTC and stored without the zone "
+                         "(10:00+02:00 became 08:00).")
         lookup = dict(zip(unique, parsed_unique))
         result = pd.Series(pd.NaT, index=s.index, dtype="datetime64[ns]")
         result.loc[strings.index] = pd.to_datetime(strings.map(lookup), errors="coerce")
         for i, v in others.items():
             if isinstance(v, (datetime, pd.Timestamp, np.datetime64)):
-                result.loc[i] = pd.Timestamp(v)
+                v = pd.Timestamp(v)
+                result.loc[i] = v.tz_convert("UTC").tz_localize(None) if v.tzinfo is not None else v
         bad = s.notna() & result.isna()
         blank = strings[strings == ""].index
         bad[blank] = False
@@ -646,7 +675,7 @@ def step_to_datetime(df: pd.DataFrame, p: dict[str, Any]) -> tuple[pd.DataFrame,
         per_column[str(c)] = {
             "converted": int(ok.size), "read_as": how, "made_missing": int(bad.sum()),
             "unparseable_values": {str(k): int(n) for k, n in failed_counts.head(10).items()},
-            "blank_to_missing": len(blank),
+            "blank_to_missing": len(blank), "time_zones_converted_to_utc": utc,
             "earliest": _show(ok.min()) if not ok.empty else None, "latest": _show(ok.max()) if not ok.empty else None,
         }
         if bad.any():

@@ -893,14 +893,17 @@ def _date_like(values: pd.Series, max_examples: int) -> dict[str, Any] | None:
     if sampled:
         counts = counts.sample(DATE_SAMPLE_UNIQUE, random_state=0)
     uniques = counts.index.to_series(index=counts.index)
-    parsed = pd.Series(pd.NaT, index=counts.index, dtype="datetime64[ns]")
+    is_date = pd.Series(False, index=counts.index)
     has_digit = uniques.str.contains(r"\d", regex=True)
     if has_digit.any():
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            parsed[has_digit] = pd.to_datetime(uniques[has_digit], errors="coerce", format="mixed")
+            # utc=True: values with a time zone ("...Z", "+02:00"), and a mix of
+            # zones and none, parse instead of raising; only "is it a date?" is needed.
+            parsed = pd.to_datetime(uniques[has_digit], errors="coerce", format="mixed", utc=True)
+        is_date[has_digit] = parsed.notna().to_numpy()
     checked = int(counts.sum())
-    share = int(counts[parsed.notna()].sum()) / checked
+    share = int(counts[is_date].sum()) / checked
     if share == 0 or share < TYPE_MATCH_RATIO:
         return None
     ok = round(share * len(values))
@@ -920,7 +923,7 @@ def _date_like(values: pd.Series, max_examples: int) -> dict[str, Any] | None:
         "issue": "dates_as_text",
         "count": ok,
         "detail": detail,
-        "non_date_examples": [repr(v) for v in uniques[parsed.isna()].head(max_examples)],
+        "non_date_examples": [repr(v) for v in uniques[~is_date].head(max_examples)],
         "date_order": order,
         "sampled": sampled,
     }

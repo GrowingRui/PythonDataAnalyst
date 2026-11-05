@@ -1,0 +1,19 @@
+schema_version: "1.0"
+name: pos19-jsonl
+description: Should load the python-data-analyst skill.
+tags: [should-trigger]
+context:
+  scaffold_script: setup.sh
+execution:
+  prompt: "events.jsonl is our app's event log. Summarise what's in it and check it for missing or odd values."
+  max_turns: 3
+  timeout_seconds: 180
+  allowed_tools: [Skill, Read, Glob, Grep]
+runs: 3
+graders:
+  - type: tool_used
+    name: skill-loaded
+    tool: Skill
+    input_match: python-data-analyst
+    min: 1
+    arm: both

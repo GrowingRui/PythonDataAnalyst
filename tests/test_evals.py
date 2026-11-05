@@ -34,7 +34,7 @@ CASES = make_cases.case_names()
 def test_groups_are_balanced_and_names_unique():
     pos = [c for c in CASES if c[2]]
     neg = [c for c in CASES if not c[2]]
-    assert len(pos) == len(neg) == 12
+    assert len(pos) == 19 and len(neg) == 16
     assert len({c[0] for c in CASES}) == len(CASES)
     assert len({c[1] for c in CASES}) == len(CASES), "two cases share a prompt"
 
@@ -91,8 +91,8 @@ def test_summary_counts_majority_per_case():
     neg = [[True] * 3] * 11 + [[True, True, False]]    # 12 of 12, one miss on majority
     text, met = run_triggers.summarize(_result(pos, neg))
     assert met
-    assert "| Should trigger | 11 of 12 | 34 of 36 |" in text
-    assert "| Should not trigger | 12 of 12 | 35 of 36 |" in text
+    assert "| Should trigger | 11 of 12 | 34 of 36 | met (at least 11 of 12) |" in text
+    assert "| Should not trigger | 12 of 12 | 35 of 36 | met (at least 11 of 12) |" in text
     assert "**pos12-x** (1 of 3 runs right, case failed)" in text
     assert "**neg12-x** (2 of 3 runs right, case passed on majority)" in text
 
@@ -103,3 +103,36 @@ def test_summary_reports_a_missed_target():
     text, met = run_triggers.summarize(_result(pos, neg))
     assert not met
     assert "missed" in text
+
+
+def test_summary_of_one_group_only():
+    # --case "pos*": the empty neg group is left out, not counted as 0 of 0.
+    text, met = run_triggers.summarize(_result([[True] * 3] * 19, []))
+    assert met
+    assert "| Should trigger | 19 of 19 | 57 of 57 | met (at least 18 of 19) |" in text
+    assert "Should not trigger" not in text
+
+
+def test_summary_of_a_small_subset_needs_every_case():
+    text, met = run_triggers.summarize(_result([[True]] * 4 + [[False]], []))
+    assert not met
+    assert "| Should trigger | 4 of 5 | 4 of 5 | missed (at least 5 of 5) |" in text
+
+
+def test_file_names_match_whole_names_only():
+    assert make_cases.files_for("What's in sample_sales.csv?") == ["sample_sales.csv"]
+    assert make_cases.files_for("Merge sales.csv and customers.xlsx.") == ["sales.csv", "customers.xlsx"]
+    assert make_cases.files_for("Read orders.parquet and save it as orders.csv.") == ["orders.parquet"]
+
+
+def test_sample_sales_fixture_is_the_real_sample_data():
+    # The Phase 14 trial missed on this file; the case must use the same bytes.
+    assert (make_cases.FIXTURES / "sample_sales.csv").read_bytes() ==         (ROOT / "sample_data" / "sample_sales.csv").read_bytes()
+
+
+def test_new_format_fixtures_load():
+    sys.path.insert(0, str(ROOT / "skills" / "python-data-analyst" / "scripts"))
+    from inspect_data import load_dataset
+    pytest.importorskip("pyarrow")
+    for name in ("orders.parquet", "events.jsonl"):
+        assert len(load_dataset(make_cases.FIXTURES / name)) > 0, name

@@ -9,20 +9,23 @@ It rewrites every ``evals/pos*`` and ``evals/neg*`` folder. Don't edit those
 folders by hand; ``tests/test_evals.py`` checks they match this file.
 
 A prompt that names one of the example files (``sales.csv``, ``survey.csv``,
-``customers.xlsx``) gets that file in its sandbox: ``claude plugin eval`` only
-runs a scaffold script from inside the case folder, so the script and the file
-are copied there from ``evals/_fixtures/``.
+``customers.xlsx``, ``sample_sales.csv``, ``orders.parquet``, ``events.jsonl``)
+gets that file in its sandbox: ``claude plugin eval`` only runs a scaffold
+script from inside the case folder, so the script and the file are copied there
+from ``evals/_fixtures/``.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 
 EVALS = Path(__file__).resolve().parent
 FIXTURES = EVALS / "_fixtures"
-FIXTURE_FILES = ("sales.csv", "survey.csv", "customers.xlsx")
+FIXTURE_FILES = ("sales.csv", "survey.csv", "customers.xlsx", "sample_sales.csv",
+                 "orders.parquet", "events.jsonl")
 SKILL = "python-data-analyst"
 
 # (slug, prompt). Requests a user would type, including indirect ones.
@@ -39,6 +42,14 @@ SHOULD_TRIGGER = [
     ("crm-export", "I just got this export (customers.xlsx) from our CRM. Before I build a dashboard on it, is anything off?"),
     ("correlation", "Are unit price and quantity related in sales.csv?"),
     ("describe", "Give me descriptive statistics for every column of survey.csv."),
+    # Added in Phase 15. The first one missed in the Phase 14 trial (word for word).
+    ("trial-miss", "What's wrong with the data in sample_sales.csv? Tell me what you'd clean."),
+    ("clean-with-log", "Clean up sales.csv: remove the duplicates and fix the dates, and keep a record of what you changed."),
+    ("fill-missing", "Fill in the missing values in survey.csv sensibly."),
+    ("prepare-excel", "Prepare customers.xlsx for analysis and fix whatever is broken in it."),
+    ("standardise-labels", "The region column in sales.csv mixes North, north and 'NORTH '. Standardise the labels."),
+    ("parquet", "Look through orders.parquet and tell me if the data has any quality problems."),
+    ("jsonl", "events.jsonl is our app's event log. Summarise what's in it and check it for missing or odd values."),
 ]
 
 # Mostly near misses: data, pandas, charts or CSV files, but not an analysis.
@@ -55,6 +66,11 @@ SHOULD_NOT_TRIGGER = [
     ("email-draft", "Draft a short email to my team saying the Q3 sales report will be a week late."),
     ("install-pandas", "How do I install pandas on Windows?"),
     ("db-schema", "Design a database schema for a library with books, members and loans."),
+    # Added in Phase 15: near misses for cleaning and the new formats.
+    ("drop-column", "Drop the legacy_code column from sales.csv and save the file."),
+    ("dedupe-function", "Write a pandas function that removes duplicate rows from a DataFrame."),
+    ("merge-files", "Merge sales.csv and customers.xlsx on customer_id into one file."),
+    ("parquet-to-csv", "Read orders.parquet and save it as orders.csv."),
 ]
 
 # Enough turns to see the first tool calls, not to finish the analysis:
@@ -81,7 +97,9 @@ def case_names() -> list[tuple[str, str, bool]]:
 
 
 def files_for(prompt: str) -> list[str]:
-    return [f for f in FIXTURE_FILES if f in prompt]
+    # Whole names only: "sample_sales.csv" must not also pull in "sales.csv".
+    return [f for f in FIXTURE_FILES
+            if re.search(rf"(?<![\w.-]){re.escape(f)}(?![\w-])", prompt)]
 
 
 def case_yaml(name: str, prompt: str, should: bool, has_files: bool) -> str:

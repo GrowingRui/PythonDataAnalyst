@@ -208,6 +208,25 @@ def test_to_datetime_refuses_to_guess_the_day_month_order():
         one(pd.DataFrame({"d": ["03/04/2025", "05/06/2025"]}), {"step": "to_datetime", "columns": ["d"]})
 
 
+def test_to_datetime_converts_time_zones_to_utc():
+    # Exports and logs often end timestamps in Z or an offset; mixed offsets must compare.
+    df = pd.DataFrame({"t": ["2025-10-01T10:00:00Z", "2025-10-01T10:00:00+02:00", "2025-10-01 10:00 -0500",
+                             "01/10/2025 10:00 UTC"]})
+    out, e = one(df, {"step": "to_datetime", "columns": ["t"], "day_first": True})
+    assert out["t"].tolist() == [pd.Timestamp("2025-10-01 10:00"), pd.Timestamp("2025-10-01 08:00"),
+                                 pd.Timestamp("2025-10-01 15:00"), pd.Timestamp("2025-10-01 10:00")]
+    assert str(out["t"].dtype) == "datetime64[ns]"
+    info = e["details"]["columns"]["t"]
+    assert info["time_zones_converted_to_utc"] and "UTC" in info["read_as"]
+    assert any("UTC" in n for n in e["notes"])
+
+
+def test_to_datetime_refuses_a_mix_of_zoned_and_plain_times():
+    df = pd.DataFrame({"t": ["2025-10-01T10:00:00Z", "2025-10-02 11:00:00"]})
+    with pytest.raises(cd.PlanError, match="time zone.*without one"):
+        one(df, {"step": "to_datetime", "columns": ["t"]})
+
+
 def test_drop_columns_and_rows():
     df = pd.DataFrame({"a": [1, None, None, 4], "b": [None, 2, None, 4], "c": ["x"] * 4})
     out, e = one(df, {"step": "drop_columns", "columns": ["c"]})

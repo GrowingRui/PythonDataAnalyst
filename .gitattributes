@@ -5,3 +5,5 @@
 # Generated eval cases are compared byte-for-byte with evals/make_cases.py
 evals/**/case.yaml text eol=lf
 *.xlsx binary
+*.parquet binary
+*.jsonl text eol=lf

@@ -2,7 +2,7 @@
 
     python evals/run_triggers.py                  # the whole suite, 3 runs per case
     python evals/run_triggers.py --runs 1         # a cheaper quick check
-    python evals/run_triggers.py --case "neg*"    # only some cases
+    python evals/run_triggers.py --case "neg*"    # only some cases (one glob)
     python evals/run_triggers.py --summarize evals/results/<file>.json   # no new runs
 
 It calls ``claude plugin eval`` on this repository (the Claude Code plugin),
@@ -10,8 +10,9 @@ using your own Claude login, so every run costs usage. The summary goes to
 ``evals/results/<date>-triggers.md``: pass rates per group and every miss.
 
 A case passes when the majority of its runs did the right thing (loaded the
-skill for ``pos*`` cases, didn't for ``neg*``). The target is at least 11 of
-12 cases in each group.
+skill for ``pos*`` cases, didn't for ``neg*``). The target is at most one
+missed case per group. A run of only a few cases (fewer than
+``MIN_CASES_FOR_A_MISS`` in a group) must get every one of them right.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ EVALS = Path(__file__).resolve().parent
 ROOT = EVALS.parent
 RESULTS = EVALS / "results"
 SKILL_MD = ROOT / "skills" / "python-data-analyst" / "SKILL.md"
-TARGET_PER_GROUP = 11
+MIN_CASES_FOR_A_MISS = 12   # smaller groups (a --case subset) may miss none
 GROUPS = {"pos": "Should trigger", "neg": "Should not trigger"}
 
 
@@ -105,13 +106,16 @@ def summarize(result: dict) -> tuple[str, bool]:
     met = True
     for g, label in GROUPS.items():
         cases = rows[g]
+        if not cases:      # e.g. --case "pos*": the other group wasn't run
+            continue
         ok = sum(c["ok"] for c in cases)
         runs_ok = sum(c["passed"] for c in cases)
         runs_all = sum(c["runs"] for c in cases)
-        hit = ok >= TARGET_PER_GROUP if len(cases) >= TARGET_PER_GROUP else ok == len(cases)
+        need = len(cases) - (1 if len(cases) >= MIN_CASES_FOR_A_MISS else 0)
+        hit = ok >= need
         met &= hit
         lines.append(f"| {label} | {ok} of {len(cases)} | {runs_ok} of {runs_all} | "
-                     f"{'met' if hit else 'missed'} (at least {TARGET_PER_GROUP} of 12) |")
+                     f"{'met' if hit else 'missed'} (at least {need} of {len(cases)}) |")
 
     misses = [c for g in GROUPS for c in rows[g] if c["passed"] < c["runs"] or not c["runs"]]
     lines += ["", "## Misses", ""]
