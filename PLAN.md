@@ -18,7 +18,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 | D4 | Scripts output facts (JSON/Markdown), and Claude writes the conclusions. | The numbers come from tested code. The commentary fits each dataset. |
 | D5 | Read-only by default. Problems are flagged, never fixed automatically. | Removing outliers or missing values changes the results, so each change needs an explanation and the user's consent. |
 | D6 | No extra dependencies beyond pandas, NumPy, Matplotlib, Seaborn, OpenPyXL and pytest. For example, we write our own Markdown table function so we don't need `tabulate`. | Easier for other people to install. |
-| D7 | Charts use one consistent, colorblind-checked palette: one color for single-series charts and a blue↔red diverging scale with a gray midpoint for correlations. | Charts stay readable and look consistent. |
+| D7 | Charts use one consistent, colorblind-checked palette: one color for single-series charts and a blue↔red diverging scale with a gray midpoint for correlations. Extended in Phase 6: a fixed 8-color order for unordered groups and a light→dark blue scale for ordered groups (`references/visualization-guide.md`). | Charts stay readable and look consistent. |
 | D8 | Personal use is optional. Users install the skill only in the projects where they want it. | You don't need it all the time. A skill costs only its one-line description until it's used. |
 
 ---
@@ -121,7 +121,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
-## Phase 6: Reference documentation ⬜
+## Phase 6: Reference documentation ✅
 
 **Goal:** the knowledge Claude (and you) can look up when needed.
 
@@ -165,3 +165,4 @@ We build this in small phases. Each phase ends with a review: you check the resu
 - 2026-11-05: Phase 3 approved, committed and pushed. Phase 4 built: `generate_eda.py` (correlations, categorical summary, 5 chart types, `--max-categories`/`--max-scatter-points`/`--max-charts`, writes `summary.json`), 97 passing tests. Additions beyond the plan: likely-ID columns are excluded from charts and correlations, Pearson-vs-Spearman gap and low-n notes on each pair, the output folder must be new or empty (never overwrites). Histogram and box plot share one PNG per column.
 - 2026-11-05: Phase 4 approved with one addition: a log-scale histogram for highly skewed positive columns. 99 passing tests. Committed and pushed.
 - 2026-11-05: Phase 5 built: `report.py` (rule-based findings with high/medium/low severity, `report.md` in 7 sections, cleaning options with their costs, analysis suggestions, limitations), called at the end of `generate_eda.py`; `summary.json` gains `findings`. 121 passing tests. Additions beyond the plan: the input file's SHA-256 is recorded before and checked after every run (the CLI exits with an error if it changed), `--key` columns are treated as IDs, findings also cover duplicate keys, placeholder values, type problems, nearly constant columns, outliers and near-duplicate columns (|r| ≥ 0.98), and the report leaves a marked spot for Claude's "Analyst interpretation".
+- 2026-11-05: Phase 5 approved, committed and pushed. Phase 6 built: `pandas-guide.md` (reading, inspection, filtering, dates, groupby, memory, pandas 3 pitfalls), `data-cleaning.md` (options and costs per problem, MCAR/MAR/MNAR, proposal template, cleaning log) and `visualization-guide.md` (question → chart, readability, colors, 5 chart recipes in the skill's style, misleading-chart pitfalls). 131 passing tests. Additions beyond the plan: `tests/test_references.py` runs every Python example in the guides against a messy sales file and checks that the links resolve and that every finding rule has a cleaning section; D7 extended with a categorical order and an ordered blue scale (validated for color-vision deficiencies).

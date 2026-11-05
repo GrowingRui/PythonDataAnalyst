@@ -111,7 +111,8 @@ script reports that the file changed during the run, tell the user.
 
 ### Step 6: Recommend next steps
 - Propose cleaning steps with their consequences (see
-  `references/data-cleaning.md`). Wait for approval before applying any.
+  `references/data-cleaning.md`; each section names the finding `rule`
+  values it covers). Wait for approval before applying any.
 - Suggest follow-up analyses that fit the goal.
 
 ## Report structure
