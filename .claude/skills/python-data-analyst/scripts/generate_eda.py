@@ -6,12 +6,14 @@ Usage:
     python generate_eda.py big.csv --max-categories 8 --max-scatter-points 3000
 
 Writes a new folder (default ./eda_output/<dataset>_<timestamp>/) containing
-summary.json and charts/*.png. The input file is only ever read.
+report.md, summary.json and charts/*.png. The input file is only ever read; its
+SHA-256 is recorded before and checked after the run.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -37,6 +39,7 @@ from inspect_data import (  # noqa: E402
     load_dataset,
     to_jsonable,
 )
+from report import build_findings, write_report  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Defaults and limits
@@ -521,13 +524,18 @@ def run_eda(
     max_scatter_points: int = DEFAULT_MAX_SCATTER_POINTS,
     max_charts: int = DEFAULT_MAX_CHARTS,
 ) -> dict[str, Any]:
-    """Analyse ``df``, write charts and summary.json into ``out_dir``, return the summary."""
+    """Analyse ``df``, write charts, summary.json and report.md into ``out_dir``, return the summary."""
     out_dir = prepare_output_dir(Path(out_dir))
     charts_dir = out_dir / "charts"
+    source_file = _source_file(df)
+    sha_before = file_sha256(source_file) if source_file else None
 
     summary = describe_dataset(df, key_columns=key_columns)
     kinds = classify_columns(df)
     ids = likely_id_columns(df, kinds)
+    # Columns given with --key are identifiers by definition, even when they
+    # repeat (which is exactly what the key check is there to catch).
+    ids += [k for k in key_columns or [] if kinds.get(k) == "numeric" and k not in ids]
     corr = correlations(df, correlation_columns(df, kinds, ids))
     cats = categorical_summary(df, kinds, max_categories)
 
@@ -587,8 +595,29 @@ def run_eda(
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     summary = to_jsonable(summary)
+    summary["findings"] = build_findings(summary)
+    if sha_before:
+        # Proof of the read-only rule: the file's fingerprint before and after.
+        summary["source"]["sha256"] = sha_before
+        summary["source"]["unchanged_after_run"] = file_sha256(source_file) == sha_before
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
+    write_report(summary, out_dir)
     return summary
+
+
+def file_sha256(path: Path) -> str:
+    """Fingerprint of a file, read in 1 MB chunks so large files don't fill memory."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _source_file(df: pd.DataFrame) -> Path | None:
+    """The file ``df`` was loaded from (set by load_dataset), if it still exists."""
+    path = df.attrs.get("source", {}).get("path")
+    return Path(path) if path and Path(path).is_file() else None
 
 
 def _describe_plan_item(kind: str, item: Any) -> str:
@@ -662,6 +691,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     print(f"EDA written to {out_dir}")
+    print("  report.md")
     print(f"  summary.json  ({summary['overview']['rows']:,} rows x {summary['overview']['columns']} columns)")
     for c in summary["charts"]:
         print(f"  {c['file']}")
@@ -672,6 +702,16 @@ def main(argv: list[str] | None = None) -> int:
         print("Strongest correlations:")
         for p in pairs:
             print(f"  {p['a']} ~ {p['b']}: Pearson {p['pearson']}, Spearman {p['spearman']} ({p['strength']}, n={p['n']})")
+    findings = summary["findings"]
+    if findings:
+        counts = ", ".join(f"{n} {sev}" for sev in ("high", "medium", "low")
+                           if (n := sum(f["severity"] == sev for f in findings)))
+        print(f"Findings: {counts}")
+        for f in findings[:5]:
+            print(f"  [{f['severity']}] {f['title'].replace('`', '')}")
+    if summary["source"].get("unchanged_after_run") is False:
+        print("Error: the input file changed during the run. Check what else is writing to it.", file=sys.stderr)
+        return 1
     return 0
 
 

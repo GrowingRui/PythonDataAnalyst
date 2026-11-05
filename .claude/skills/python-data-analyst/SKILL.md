@@ -87,16 +87,27 @@ This creates `eda_output/<dataset>_<timestamp>/` containing `report.md`,
 | `--max-charts N` | Cap on the number of charts (default 40); skipped charts are listed in `summary.json` |
 | `--key COLS` | Key columns for the duplicate-key check, e.g. `order_id` |
 
-Columns that look like row IDs (`order_id`, `customerID`, or a 1, 2, 3, ...
-counter) are left out of charts and correlations; `summary.json` lists them
-under `analysis.excluded_id_columns`. Mention this if the user expected them.
+Columns that look like row IDs (`order_id`, `customerID`, a 1, 2, 3, ...
+counter, or any numeric column passed with `--key`) are left out of charts
+and correlations; `summary.json` lists them under
+`analysis.excluded_id_columns`. Mention this if the user expected them.
+
+`report.md` is complete without you: overview, quality, statistics,
+rule-based findings, a short text per chart, cleaning options with their
+costs, and limitations. `summary.json` holds the same facts, with the ranked
+findings under `findings` (each has `rule`, `severity`, `columns`, `title`,
+`detail`). The input file's SHA-256 is recorded in `source.sha256`; if the
+script reports that the file changed during the run, tell the user.
 
 ### Step 5: Interpret
-- Read `summary.json` and **look at the charts** (open the PNGs) before
-  writing conclusions.
-- Add an **"Analyst interpretation"** section to the generated `report.md`
-  (the generated report, never the dataset) with the 3–7 most important
-  findings, ranked by their impact on the user's goal.
+- Read `summary.json` (start with `findings`) and **look at the charts**
+  (open the PNGs) before writing conclusions.
+- The findings are mechanical: severity means "could distort an analysis",
+  not "matters for this user". Re-rank them against the user's goal.
+- In the generated `report.md` (never the dataset), replace the line
+  `<!-- analyst-interpretation: ... -->` at the end of section 4 with an
+  `### Analyst interpretation` subsection: the 3–7 findings that matter most
+  for the user's goal, each with what you saw in the charts.
 
 ### Step 6: Recommend next steps
 - Propose cleaning steps with their consequences (see
@@ -110,7 +121,7 @@ under `analysis.excluded_id_columns`. Mention this if the user expected them.
 1. **Dataset overview**: file, rows × columns, column types, memory
 2. **Data quality assessment**: missing values, duplicates, type problems, outliers
 3. **Descriptive statistics**: numeric and categorical summaries
-4. **Important findings**: ranked, factual, with numbers
+4. **Key findings**: ranked, factual, with numbers, then your analyst interpretation
 5. **Visualization summaries**: one or two sentences per chart: what it shows
 6. **Suggested next steps**: cleaning options (with consequences) and further analysis
 7. **Limitations**: the methods used and what they can't tell you

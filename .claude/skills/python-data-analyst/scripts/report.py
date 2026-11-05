@@ -1,0 +1,884 @@
+"""Rule-based findings and the Markdown report, built from an EDA summary.
+
+generate_eda.py calls build_findings() and write_report() at the end of every
+run, so you normally don't run this module yourself. Everything here works on
+the plain summary dict (the same data as summary.json): no pandas, no file
+reading, nothing that could touch the dataset.
+
+The findings are deliberately mechanical: thresholds, counts and percentages.
+They tell you *where to look*. Deciding what matters for the user's goal is
+the analyst's job (decision D4), which is why the report leaves a marked spot
+for an "Analyst interpretation" section.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+# --------------------------------------------------------------------------
+# Thresholds (rules of thumb, not laws: each one is explained in the report)
+# --------------------------------------------------------------------------
+
+MISSING_HIGH_PCT = 40.0  # a column this empty is barely usable
+MISSING_MEDIUM_PCT = 10.0  # below this, gaps are listed together as one minor finding
+INCOMPLETE_ROWS_PCT = 20.0  # share of rows with any gap before dropna() becomes costly
+DUPLICATE_HIGH_PCT = 5.0
+DOMINANT_PCT = 95.0  # one category this common makes the column nearly constant
+OUTLIER_MEDIUM_PCT = 5.0
+CORR_FINDING = 0.5  # |r| or |rho| from "strong" upwards becomes a finding
+CORR_MEDIUM = 0.7
+CORR_REDUNDANT = 0.98  # almost perfect: one column may be derived from the other
+CORR_FINDINGS_MAX = 10  # wide data could otherwise produce hundreds of pairs
+SMALL_DATA_ROWS = 30
+
+SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
+
+REPORT_SECTIONS = (
+    "1. Dataset overview",
+    "2. Data quality assessment",
+    "3. Descriptive statistics",
+    "4. Key findings",
+    "5. Visualization summaries",
+    "6. Suggested next steps",
+    "7. Limitations",
+)
+
+# Claude replaces this marker with an "Analyst interpretation" subsection.
+INTERPRETATION_MARKER = (
+    "<!-- analyst-interpretation: the analyst adds an \"Analyst interpretation\" "
+    "subsection here after reviewing the charts -->"
+)
+
+# What each kind of problem can be done about, and what that costs. Shown in
+# "Suggested next steps". Nothing here is ever applied automatically (D5).
+CLEANING_ADVICE: dict[str, tuple[str, str, str]] = {
+    # rule: (problem label, options, cost)
+    "empty_columns": (
+        "Empty columns",
+        "Drop them.",
+        "Nothing is lost, provided they are empty because they're unused and not because an export failed.",
+    ),
+    "missing_values": (
+        "Missing values",
+        "Leave them missing and report counts per analysis; drop incomplete rows (`dropna()`); or fill them "
+        "(median/mode, or a model), ideally with an extra \"was missing\" indicator column.",
+        "Dropping rows shrinks the sample and biases results when values aren't missing at random. "
+        "Filling with one value shrinks the spread and weakens correlations.",
+    ),
+    "disguised_missing": (
+        "Placeholder values",
+        "Turn the placeholders into real missing values, e.g. `pd.read_csv(..., na_values=['-', 'unknown'])`.",
+        "The missing counts go up and the column may become numeric. First check that the placeholder never "
+        "means something real (\"unknown\" can be a valid survey answer).",
+    ),
+    "duplicate_rows": (
+        "Exact duplicate rows",
+        "Remove them with `drop_duplicates()`, keeping the first copy.",
+        "Right if each row should be a unique record; wrong if identical rows are genuine repeat events, "
+        "which you would then undercount.",
+    ),
+    "duplicate_keys": (
+        "Repeated keys",
+        "Investigate the source, then decide which row wins per key (latest, most complete) or aggregate.",
+        "Keeping one version discards the others; aggregating changes what a row means.",
+    ),
+    "numbers_as_text": (
+        "Numbers stored as text",
+        "Strip currency signs, % and thousands separators, then `pd.to_numeric(..., errors='coerce')`.",
+        "Values that still don't parse become missing. List them first so nothing disappears silently.",
+    ),
+    "dates_as_text": (
+        "Dates stored as text",
+        "Parse with `pd.to_datetime(..., format='...')` using an explicit format.",
+        "Without a format, 03/04 can be read as 3 April or March 4; unparseable values become missing.",
+    ),
+    "mixed_types": (
+        "Mixed value types",
+        "Find out why the types are mixed (often a numeric column with a few text notes), then convert to one type.",
+        "The odd values become missing or change meaning.",
+    ),
+    "inconsistent_labels": (
+        "Inconsistent labels",
+        "Standardise them: trim spaces and pick one case or spelling (e.g. `.str.strip().str.title()`).",
+        "Merges groups. Check that no two variants are genuinely different codes.",
+    ),
+    "untrimmed_whitespace": (
+        "Leading or trailing spaces",
+        "Trim with `.str.strip()`.",
+        "Safe in almost every case; only matters when spacing is meaningful (fixed-width codes).",
+    ),
+    "constant_column": (
+        "Constant columns",
+        "Leave them out of the analysis.",
+        "Nothing is lost within this file, but check that the column isn't constant because of a filter or export setting.",
+    ),
+    "dominant_category": (
+        "Nearly constant columns",
+        "Keep them, but treat comparisons between groups with care.",
+        "The small groups have few rows, so any result for them is uncertain.",
+    ),
+    "skewed": (
+        "Skewed columns",
+        "Describe them with the median and IQR; use a log scale in charts or a log transform in models.",
+        "A log transform changes the meaning (ratios instead of differences) and can't handle zeros or negatives.",
+    ),
+    "outliers": (
+        "Outliers",
+        "Check the most extreme values against the source first. Then keep them, cap them (winsorise), "
+        "or analyse with and without them.",
+        "Removing real values biases means and totals and hides the cases that may matter most. "
+        "Capping keeps the rows but changes the values.",
+    ),
+}
+# Several findings share the same advice.
+ADVICE_ALIAS = {"missing_minor": "missing_values", "incomplete_rows": "missing_values"}
+
+
+# --------------------------------------------------------------------------
+# Findings
+# --------------------------------------------------------------------------
+
+
+def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
+    """Rule-based findings, most important first.
+
+    Each finding is a dict with ``rule``, ``severity`` (high / medium / low),
+    ``columns``, ``title`` and ``detail`` (both Markdown). Severity means "how
+    much this can distort an analysis if ignored", not "how interesting it is".
+    """
+    ov = summary["overview"]
+    st = summary["statistics"]
+    q = summary["quality"]
+    analysis = summary.get("analysis", {})
+    ids = set(analysis.get("excluded_id_columns", []))
+    rows = ov["rows"]
+    out: list[dict[str, Any]] = []
+
+    def add(rule: str, severity: str, columns: list[str], title: str, detail: str, metric: float = 0.0) -> None:
+        out.append({"rule": rule, "severity": severity, "columns": columns,
+                    "title": title, "detail": detail, "_metric": float(metric)})
+
+    # --- missing values -------------------------------------------------------
+    miss_cols = q["missing"]["columns"]
+    empty = [c["name"] for c in miss_cols if rows and c["missing"] == rows]
+    if empty:
+        add("empty_columns", "high", empty,
+            f"{_plural(len(empty), 'column is', 'columns are')} completely empty: {_codes(empty)}",
+            f"Every value is missing, so {'it carries' if len(empty) == 1 else 'they carry'} no information.", 100)
+
+    minor = []
+    for c in miss_cols:
+        if c["name"] in empty or not c["missing"]:
+            continue
+        pct = c["missing_pct"]
+        if pct >= MISSING_MEDIUM_PCT:
+            add("missing_values", "high" if pct >= MISSING_HIGH_PCT else "medium", [c["name"]],
+                f"{code(c['name'])} is missing {_pct(pct)} of its values ({c['missing']:,} of {rows:,} rows)",
+                "Any analysis that drops incomplete rows loses these rows. If the gaps aren't random "
+                "(e.g. only one region or period is affected), results computed on the rest are biased. "
+                "Check whether the gaps cluster in particular groups.", pct)
+        else:
+            minor.append(c)
+    if minor:
+        listed = ", ".join(f"{code(c['name'])} ({_pct(c['missing_pct'])})" for c in minor)
+        add("missing_minor", "low", [c["name"] for c in minor],
+            f"{_plural(len(minor), 'column has', 'columns have')} a few missing values "
+            f"(under {MISSING_MEDIUM_PCT:g}% each)",
+            f"{listed}.", max(c["missing_pct"] for c in minor))
+
+    m = q["missing"]
+    gappy = [c for c in miss_cols if c["missing"] and c["name"] not in empty]
+    if len(gappy) >= 2 and m["rows_with_missing_pct"] >= INCOMPLETE_ROWS_PCT:
+        add("incomplete_rows", "medium", [c["name"] for c in gappy],
+            f"Only {_pct(100 - m['rows_with_missing_pct'])} of rows are complete",
+            f"{m['rows_with_missing']:,} rows ({_pct(m['rows_with_missing_pct'])}) have at least one gap "
+            f"(empty columns not counted separately). Dropping every incomplete row (`dropna()`) would leave "
+            f"{m['complete_rows']:,} of {rows:,} rows.", m["rows_with_missing_pct"])
+
+    for c in miss_cols:
+        if c["disguised"]:
+            values = ", ".join(f"{code(_unrepr(k))} ×{v}" for k, v in c["disguised_values"].items())
+            add("disguised_missing", "medium", [c["name"]],
+                f"{code(c['name'])} has {_plural(c['disguised'], 'placeholder value', 'placeholder values')} "
+                f"that probably mean \"missing\"",
+                f"{values}. They are stored as text, so pandas counts them as present. Counting them, the "
+                f"column is missing {_pct(c['missing_pct'] + c['disguised_pct'])} instead of "
+                f"{_pct(c['missing_pct'])}.", c["disguised_pct"])
+
+    # --- duplicates -------------------------------------------------------------
+    d = q["duplicates"]
+    if d["duplicate_rows"]:
+        add("duplicate_rows", "high" if d["duplicate_pct"] >= DUPLICATE_HIGH_PCT else "medium", [],
+            f"{_plural(d['duplicate_rows'], 'exact duplicate row', 'exact duplicate rows')} "
+            f"({_pct(d['duplicate_pct'])})",
+            "Every column matches an earlier row. If each row should be a unique record, duplicates inflate "
+            "counts and totals; they can also be genuine (two identical purchases)."
+            + _dup_examples(d), d["duplicate_pct"])
+    kd = q.get("key_duplicates")
+    if kd and kd["duplicate_rows"]:
+        keys = kd["subset"] or []
+        add("duplicate_keys", "high", list(keys),
+            f"{_plural(kd['duplicate_rows'], 'row repeats', 'rows repeat')} a key on {_codes(keys)} "
+            f"({_pct(kd['duplicate_pct'])})",
+            "These rows share a key that should be unique; where they differ in other columns it isn't "
+            "clear which version is correct." + _dup_examples(kd), 100 + kd["duplicate_pct"])
+
+    # --- type problems ------------------------------------------------------------
+    for issue in q["type_issues"]:
+        add(issue["issue"], "low" if issue["issue"] == "untrimmed_whitespace" else "medium", [issue["column"]],
+            _type_issue_title(issue), _type_issue_detail(issue), issue.get("count", 0))
+
+    # --- constant and nearly constant columns -------------------------------------
+    for c in ov["column_info"]:
+        name, s = c["name"], st.get(c["name"], {})
+        if c["kind"] == "empty" or not c["non_null"]:
+            continue
+        if c["unique"] == 1:
+            add("constant_column", "medium", [name],
+                f"{code(name)} has the same value ({code(_single_value(s))}) in every non-missing row",
+                "A column that never changes can't explain any differences in the data.", 100)
+            continue
+        top = _dominant(s)
+        if top and top[1] >= DOMINANT_PCT:
+            add("dominant_category", "low", [name],
+                f"{code(name)} is nearly constant: {code(top[0])} makes up {_pct(top[1])} of values",
+                "The other values have very few rows, so comparisons between groups rest on small numbers.",
+                top[1])
+
+    # --- distributions ------------------------------------------------------------
+    skewed = set()
+    for name, s in st.items():
+        if s.get("kind") != "numeric" or name in ids or not (s.get("skew_label") or "").startswith("highly"):
+            continue
+        skewed.add(name)
+        add("skewed", "medium", [name],
+            f"{code(name)} is {s['skew_label']} (skewness {_num(s['skewness'], 2)})", _skew_detail(s),
+            abs(s["skewness"]))
+
+    for name, o in q["outliers"].items():
+        if name in ids or o.get("status") != "ok" or not o["n_outliers"]:
+            continue
+        expected = name in skewed
+        severity = "medium" if o["outlier_pct"] >= OUTLIER_MEDIUM_PCT and not expected else "low"
+        parts = [f"Fences {_num(o['lower_fence'])} to {_num(o['upper_fence'])} "
+                 f"({o['n_low']:,} below, {o['n_high']:,} above)."]
+        if o["highest_outliers"]:
+            parts.append(f"Highest: {', '.join(_num(v) for v in o['highest_outliers'])}.")
+        if o["lowest_outliers"]:
+            parts.append(f"Lowest: {', '.join(_num(v) for v in o['lowest_outliers'])}.")
+        parts.append("Unusual doesn't mean wrong.")
+        if expected:
+            parts.append("The column is highly skewed, so many flags are expected and are probably legitimate.")
+        if o.get("note"):
+            parts.append(_sentence(o["note"]))
+        add("outliers", severity, [name],
+            f"{code(name)}: {_plural(o['n_outliers'], 'value', 'values')} ({_pct(o['outlier_pct'])}) "
+            f"outside the IQR fences", " ".join(parts), o["outlier_pct"])
+
+    # --- relationships ------------------------------------------------------------
+    pairs = [p for p in analysis.get("correlations", {}).get("pairs", []) if _pair_strength(p) >= CORR_FINDING]
+    for p in pairs[:CORR_FINDINGS_MAX]:
+        strength = _pair_strength(p)
+        redundant = p["pearson"] is not None and abs(p["pearson"]) >= CORR_REDUNDANT
+        moves = "rise together" if p["direction"] == "positive" else "move in opposite directions"
+        detail = f"The two columns tend to {moves}."
+        if redundant:
+            detail += (" The relationship is almost perfect, so one column may be derived from the other "
+                       "(a total and its parts, the same quantity in two units). Use only one of them in a model.")
+        for note in p.get("notes", []):
+            detail += f" {_sentence(note)}"
+        detail += " This is an association, not evidence that one causes the other."
+        add("near_duplicate_columns" if redundant else "strong_correlation",
+            "medium" if strength >= CORR_MEDIUM else "low", [p["a"], p["b"]],
+            f"{code(p['a'])} and {code(p['b'])} are {p['strength']}ly {p['direction']}ly correlated "
+            f"(Pearson r = {_num(p['pearson'], 2)}, Spearman ρ = {_num(p['spearman'], 2)}, n = {p['n']:,})",
+            detail, strength)
+    if len(pairs) > CORR_FINDINGS_MAX:
+        add("more_correlations", "low", [],
+            f"{len(pairs) - CORR_FINDINGS_MAX:,} more strongly correlated pairs are not listed here",
+            "All pairs, ranked by strength, are in `summary.json` under `analysis.correlations.pairs`.")
+
+    if ids:
+        add("id_columns", "low", sorted(ids),
+            f"{_plural(len(ids), 'column was treated as a row ID', 'columns were treated as row IDs')}: "
+            f"{_codes(sorted(ids))}",
+            "Key columns given with `--key`, and unique whole numbers named like an ID or counting 1, 2, 3, "
+            "..., are left out of the charts and correlations. If one is a real measurement, analyse it "
+            "separately.")
+
+    out.sort(key=lambda f: (SEVERITY_ORDER[f["severity"]], -f["_metric"]))
+    for f in out:
+        del f["_metric"]
+    return out
+
+
+def _type_issue_title(i: dict[str, Any]) -> str:
+    col = code(i["column"])
+    return {
+        "numbers_as_text": f"{col} holds numbers stored as text",
+        "dates_as_text": f"{col} holds dates stored as text",
+        "mixed_types": f"{col} mixes different value types",
+        "inconsistent_labels": f"{col} writes the same label in different ways",
+        "untrimmed_whitespace": f"{col} has values with leading or trailing spaces",
+    }.get(i["issue"], f"{col}: {i['issue'].replace('_', ' ')}")
+
+
+def _type_issue_detail(i: dict[str, Any]) -> str:
+    parts = [_sentence(i.get("detail", ""))]
+    issue = i["issue"]
+    if issue == "numbers_as_text":
+        parts.append("Until converted, the column can't be summed, averaged or correlated.")
+        if i.get("non_numeric_examples"):
+            parts.append(f"Values that don't parse: {_examples(i['non_numeric_examples'])}.")
+    elif issue == "dates_as_text":
+        parts.append("Until parsed, it can't be sorted or grouped by date reliably.")
+        if i.get("non_date_examples"):
+            parts.append(f"Values that don't parse: {_examples(i['non_date_examples'])}.")
+    elif issue == "inconsistent_labels" and i.get("groups"):
+        groups = "; ".join(" / ".join(f"{code(v['value'])} ×{v['count']}" for v in g) for g in i["groups"][:3])
+        parts.append(f"Counts per category are split between the variants: {groups}.")
+    elif i.get("examples"):
+        parts.append(f"Examples: {_examples(i['examples'])}.")
+    return " ".join(p for p in parts if p)
+
+
+def _skew_detail(s: dict[str, Any]) -> str:
+    mean, median = s["mean"], s["median"]
+    right = s["skewness"] > 0
+    pull = "a few large values pull the average up" if right else "a few small values pull the average down"
+    if median and mean is not None and (mean > 0) == (median > 0):
+        ratio = mean / median
+        comparison = (f"The mean ({_num(mean)}) is {_num(ratio, 2)}× the median ({_num(median)})"
+                      if ratio >= 1 else f"The mean ({_num(mean)}) is {_pct(100 * ratio)} of the median ({_num(median)})")
+    else:
+        comparison = f"The mean is {_num(mean)} and the median {_num(median)}"
+    return (f"{comparison}: {pull}. Use the median to describe a typical value; "
+            "for charts and models, a log scale often helps.")
+
+
+def _single_value(s: dict[str, Any]) -> str:
+    kind = s.get("kind")
+    if kind == "numeric":
+        return _num(s.get("min"))
+    if kind == "boolean":
+        return "True" if s.get("true") else "False"
+    if kind == "datetime":
+        return str(s.get("min"))
+    tops = s.get("top_values") or []
+    return tops[0]["value"] if tops else "?"
+
+
+def _dominant(s: dict[str, Any]) -> tuple[str, float] | None:
+    """(value, percent) of the most common value for categorical/boolean columns."""
+    if s.get("kind") == "boolean" and s.get("true_pct") is not None:
+        t = s["true_pct"]
+        return ("True", t) if t >= 50 else ("False", round(100 - t, 2))
+    if s.get("kind") == "categorical" and s.get("top_values"):
+        top = s["top_values"][0]
+        return top["value"], top["pct"]
+    return None
+
+
+def _pair_strength(p: dict[str, Any]) -> float:
+    return max(abs(v) for v in (p.get("pearson"), p.get("spearman"), 0.0) if v is not None)
+
+
+def _dup_examples(d: dict[str, Any]) -> str:
+    if not d.get("examples"):
+        return ""
+    groups = "; ".join(", ".join(str(r) for r in e["rows"]) for e in d["examples"][:3])
+    return f" Example rows (0-based position): {groups}."
+
+
+# --------------------------------------------------------------------------
+# Next steps and limitations
+# --------------------------------------------------------------------------
+
+
+def cleaning_options(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """One entry per kind of problem found, with the columns it affects."""
+    merged: dict[str, dict[str, Any]] = {}
+    for f in findings:
+        key = ADVICE_ALIAS.get(f["rule"], f["rule"])
+        if key not in CLEANING_ADVICE:
+            continue
+        label, options, cost = CLEANING_ADVICE[key]
+        entry = merged.setdefault(key, {"problem": label, "columns": [], "options": options, "cost": cost})
+        for c in f["columns"]:
+            if c not in entry["columns"]:
+                entry["columns"].append(c)
+    return list(merged.values())
+
+
+def analysis_suggestions(summary: dict[str, Any], findings: list[dict[str, Any]]) -> list[str]:
+    st = summary["statistics"]
+    ids = set(summary.get("analysis", {}).get("excluded_id_columns", []))
+    rules = {f["rule"] for f in findings}
+    numeric = [k for k, v in st.items() if v.get("kind") == "numeric" and k not in ids and v.get("count")]
+    categorical = [k for k, v in st.items() if v.get("kind") in ("categorical", "boolean") and v.get("count")]
+    dates = [k for k, v in st.items() if v.get("kind") == "datetime"]
+    dates += [i["column"] for i in summary["quality"]["type_issues"] if i["issue"] == "dates_as_text"]
+
+    out = ["Agree on the question this data should answer. It decides which of the findings above matter most."]
+    if dates and numeric:
+        out.append(f"Plot how {_codes(numeric[:3])} change over time using {code(dates[0])}"
+                   + (" (after parsing the dates)." if dates[0] not in st or st[dates[0]].get("kind") != "datetime"
+                      else "."))
+    if categorical and numeric:
+        out.append(f"Compare {code(numeric[0])} across the groups of {code(categorical[0])}: medians and "
+                   "box plots per group (`df.groupby(...)[...].describe()`).")
+    if rules & {"strong_correlation", "near_duplicate_columns"}:
+        out.append("For the strongest pairs, look at the scatter plots and ask whether a third variable "
+                   "(time, size, region) could drive both.")
+    if "skewed" in rules:
+        skewed = [f["columns"][0] for f in findings if f["rule"] == "skewed"]
+        out.append(f"Use medians or a log scale when comparing groups on {_codes(skewed[:4])}.")
+    gaps = [f["columns"][0] for f in findings if f["rule"] == "missing_values"]
+    if gaps:
+        out.append(f"Check whether the gaps in {_codes(gaps[:3])} depend on other columns (compare the "
+                   "missing rate across groups). That shows whether dropping rows would bias the results.")
+    return out
+
+
+def limitations(summary: dict[str, Any]) -> list[str]:
+    ov, q = summary["overview"], summary["quality"]
+    analysis = summary.get("analysis", {})
+    src = summary.get("source", {})
+    out = []
+    if ov["rows"] < SMALL_DATA_ROWS:
+        out.append(f"**Small dataset.** With {ov['rows']:,} rows, every statistic here is uncertain and a "
+                   "single row can change the picture.")
+    out += [
+        "**IQR outliers** are a rule of thumb for roughly symmetric data. On skewed data they flag many "
+        "legitimate values; on small samples the quartiles themselves are unstable.",
+        "**Correlation.** Pearson measures straight-line relationships and is sensitive to outliers; "
+        "Spearman measures any steadily rising or falling relationship. Neither detects U-shaped "
+        "relationships, and neither shows cause and effect.",
+        "**Only numeric columns are correlated.** Relationships involving categorical columns are not "
+        "measured here.",
+        "**Column types are detected by rules** (for example, text with mostly unique values counts as "
+        "free text). Check the overview table if a column was classified unexpectedly.",
+        "**Disguised missing values** are matched against a fixed list of placeholders (`-`, `?`, "
+        "`unknown`, `n/a`, ...). Codes such as `0` or `999` meaning \"no answer\" are not detected.",
+    ]
+    if analysis.get("excluded_id_columns"):
+        out.append(f"**ID columns excluded** from charts and correlations: "
+                   f"{_codes(analysis['excluded_id_columns'])}.")
+    na = [k for k, o in q["outliers"].items() if o.get("status") in ("zero_iqr", "skipped")]
+    if na:
+        out.append(f"**IQR not applied** to {_codes(na)}: too few values, or more than half the values identical.")
+    sampled = [c for c in summary.get("charts", []) if c.get("sampled")]
+    if sampled:
+        out.append(f"**Scatter plots are sampled.** {len(sampled)} scatter plot(s) show a random sample of "
+                   f"{sampled[0]['points_shown']:,} points; the correlations use every row.")
+    if any(i.get("sampled") for i in q["type_issues"]):
+        out.append("**Date detection was sampled** on columns with many distinct values; counts of "
+                   "date-like text are estimates.")
+    if summary.get("charts_skipped"):
+        out.append(f"**{len(summary['charts_skipped'])} chart(s) skipped** by the chart limit "
+                   "(`--max-charts`); they are listed in `summary.json` under `charts_skipped`.")
+    for c in summary.get("charts", []):
+        if c.get("note"):
+            out.append(f"**Heatmap trimmed:** {c['note']}.")
+    sheets = src.get("available_sheets") or []
+    if src.get("format") == "excel" and len(sheets) > 1:
+        others = [s for s in sheets if s != src.get("sheet")]
+        out.append(f"**Only sheet {code(src.get('sheet'))} was analysed.** The file also contains "
+                   f"{_codes(others)}.")
+    return out
+
+
+# --------------------------------------------------------------------------
+# Rendering
+# --------------------------------------------------------------------------
+
+
+def render_report(summary: dict[str, Any]) -> str:
+    """The full report.md text. Uses summary["findings"] if present, else builds them."""
+    findings = summary.get("findings")
+    if findings is None:
+        findings = build_findings(summary)
+    parts = [
+        _header(summary),
+        _section_overview(summary),
+        _section_quality(summary),
+        _section_statistics(summary),
+        _section_findings(findings),
+        _section_charts(summary),
+        _section_next_steps(summary, findings),
+        _section_limitations(summary),
+    ]
+    return "\n\n".join(p.strip("\n") for p in parts) + "\n"
+
+
+def write_report(summary: dict[str, Any], out_dir: Path) -> Path:
+    path = Path(out_dir) / "report.md"
+    path.write_text(render_report(summary), encoding="utf-8")
+    return path
+
+
+def _header(s: dict[str, Any]) -> str:
+    src = s.get("source", {})
+    name = src.get("file_name") or "dataset"
+    when = s.get("settings", {}).get("generated_at", "")
+    lines = [f"# EDA report: {code(name)}", ""]
+    lines.append(f"Generated {when.replace('T', ' ')} by `generate_eda.py`. Every number below was computed "
+                 "from the data; the findings are rule-based and still need interpretation." if when else
+                 "Every number below was computed from the data; the findings are rule-based and still need "
+                 "interpretation.")
+    if src.get("sha256"):
+        state = ("unchanged after the run" if src.get("unchanged_after_run")
+                 else "**CHANGED during the run, investigate**")
+        lines += ["", f"The input file was only read. SHA-256 `{src['sha256']}`, {state}."]
+    return "\n".join(lines)
+
+
+def _section_overview(s: dict[str, Any]) -> str:
+    ov, src = s["overview"], s.get("source", {})
+    missing = {c["name"]: c["missing_pct"] for c in s["quality"]["missing"]["columns"]}
+    if src.get("format") == "excel":
+        how = f"Excel, sheet {code(src.get('sheet'))}"
+    elif src.get("format") == "csv":
+        how = f"text, encoding `{src.get('encoding')}`, delimiter {code(_delim(src.get('delimiter')))}"
+    else:
+        how = "in-memory data"
+    lines = [f"## {REPORT_SECTIONS[0]}", ""]
+    file_line = f"- **File:** {code(src.get('file_name', '?'))} ({how})"
+    if src.get("file_bytes") is not None:
+        file_line += f", {_bytes(src['file_bytes'])} on disk"
+    lines.append(file_line)
+    lines.append(f"- **Size:** {ov['rows']:,} rows × {ov['columns']:,} columns, {ov['memory_human']} in memory")
+    lines.append("- **Column kinds:** " + ", ".join(f"{v} {k}" for k, v in ov["kind_counts"].items()))
+    lines += ["", md_table(
+        ["Column", "Kind", "dtype", "Non-missing", "Missing", "Unique"],
+        [[code(c["name"]), c["kind"], f"`{c['dtype']}`", c["non_null"], _pct(missing.get(c["name"], 0.0)), c["unique"]]
+         for c in ov["column_info"]],
+    )]
+    return "\n".join(lines)
+
+
+def _section_quality(s: dict[str, Any]) -> str:
+    q, rows = s["quality"], s["overview"]["rows"]
+    m = q["missing"]
+    lines = [f"## {REPORT_SECTIONS[1]}", "", "### Missing values", ""]
+    lines.append(f"{m['total_missing']:,} of {m['total_cells']:,} cells are empty ({_pct(m['total_missing_pct'])}). "
+                 f"{m['rows_with_missing']:,} rows ({_pct(m['rows_with_missing_pct'])}) have at least one gap; "
+                 f"{m['complete_rows']:,} are complete.")
+    if m.get("total_disguised"):
+        lines.append(f"Another {m['total_disguised']:,} values are placeholders such as `-` or `unknown` that "
+                     "probably mean missing.")
+    gap_rows = [[code(c["name"]), c["missing"], _pct(c["missing_pct"]), c["disguised"],
+                 ", ".join(f"{code(_unrepr(k))} ×{v}" for k, v in c["disguised_values"].items()) or "–"]
+                for c in sorted(m["columns"], key=lambda c: -(c["missing_pct"] + c["disguised_pct"]))
+                if c["missing"] or c["disguised"]]
+    if gap_rows:
+        lines += ["", md_table(["Column", "Missing", "Missing %", "Placeholders", "Placeholder values"], gap_rows)]
+
+    lines += ["", "### Duplicates", ""]
+    for label, d in (("Exact duplicate rows (all columns equal)", q["duplicates"]),
+                     ("Repeated keys", q.get("key_duplicates"))):
+        if d is None:
+            continue
+        if label == "Repeated keys":
+            label = f"Repeated keys on {_codes(d['subset'] or [])}"
+        lines.append(f"- **{label}:** {d['duplicate_rows']:,} extra rows ({_pct(d['duplicate_pct'])}), "
+                     f"{d['groups']:,} distinct repeated value(s)." if d["duplicate_rows"] else f"- **{label}:** none.")
+    if q.get("key_duplicates") is None:
+        lines.append("- **Repeated keys:** not checked. Run with `--key <column>` if rows have an ID that "
+                     "should be unique.")
+
+    lines += ["", "### Type problems", ""]
+    if q["type_issues"]:
+        lines.append(md_table(
+            ["Column", "Problem", "Affected values", "Detail"],
+            [[code(i["column"]), i["issue"].replace("_", " "), i.get("count", "–"), _sentence(i.get("detail", ""))]
+             for i in q["type_issues"]],
+        ))
+    else:
+        lines.append("None found: no numbers or dates stored as text, mixed types, inconsistent labels or "
+                     "stray spaces.")
+
+    lines += ["", "### Outliers (IQR method)", ""]
+    if q["outliers"]:
+        lines.append("A value is flagged when it lies below Q1 − 1.5 × IQR or above Q3 + 1.5 × IQR "
+                     "(IQR = Q3 − Q1). Flagged means unusual, not wrong.")
+        out_rows = []
+        for name, o in q["outliers"].items():
+            if o.get("status") == "ok":
+                out_rows.append([code(name), o["n_outliers"], _pct(o["outlier_pct"]), o["n_low"], o["n_high"],
+                                 f"{_num(o['lower_fence'])} to {_num(o['upper_fence'])}", _sentence(o.get("note", "")) or "–"])
+            else:
+                out_rows.append([code(name), "–", "–", "–", "–", "–", _sentence(o.get("note", o.get("status", "")))])
+        lines += ["", md_table(["Column", "Outliers", "Share", "Low", "High", "Fences", "Note"], out_rows)]
+    else:
+        lines.append("No numeric columns, so no outlier check.")
+    if rows == 0:
+        lines += ["", "The dataset has no rows."]
+    return "\n".join(lines)
+
+
+def _section_statistics(s: dict[str, Any]) -> str:
+    st = s["statistics"]
+    lines = [f"## {REPORT_SECTIONS[2]}"]
+    by_kind: dict[str, dict[str, Any]] = {}
+    for name, v in st.items():
+        by_kind.setdefault(v.get("kind", "?"), {})[name] = v
+
+    if "numeric" in by_kind:
+        lines += ["", "### Numeric columns", "", md_table(
+            ["Column", "Count", "Mean", "Std", "Min", "Q1", "Median", "Q3", "Max", "Skewness", "Shape"],
+            [[code(k), v["count"], v["mean"], v["std"], v["min"], v["q1"], v["median"], v["q3"], v["max"],
+              None if v["skewness"] is None else round(v["skewness"], 2), v.get("skew_label") or "–"]
+             for k, v in by_kind["numeric"].items()],
+        )]
+        lines += ["", "Std is the sample standard deviation. When mean and median differ a lot, the median is "
+                      "the better \"typical\" value."]
+    if "boolean" in by_kind:
+        lines += ["", "### True/false columns", "", md_table(
+            ["Column", "Count", "True", "False", "True %"],
+            [[code(k), v["count"], v["true"], v["false"], _pct(v["true_pct"]) if v["true_pct"] is not None else "–"]
+             for k, v in by_kind["boolean"].items()],
+        )]
+    if "datetime" in by_kind:
+        lines += ["", "### Date columns", "", md_table(
+            ["Column", "Count", "Earliest", "Latest", "Span (days)", "Unique"],
+            [[code(k), v["count"], v["min"], v["max"], v["range_days"], v["unique"]] for k, v in by_kind["datetime"].items()],
+        )]
+    cat = {**by_kind.get("categorical", {}), **by_kind.get("text", {})}
+    if cat:
+        lines += ["", "### Categorical and text columns", "", md_table(
+            ["Column", "Kind", "Count", "Unique", "Most common values"],
+            [[code(k), v["kind"], v["count"], v["unique"],
+              ", ".join(f"{code(t['value'])} {_pct(t['pct'])}" for t in v["top_values"]) or "–"]
+             for k, v in cat.items()],
+        )]
+    if "empty" in by_kind:
+        lines += ["", f"**Empty columns** (every value missing): {_codes(list(by_kind['empty']))}."]
+    if len(lines) == 1:
+        lines += ["", "No columns to describe."]
+    return "\n".join(lines)
+
+
+def _section_findings(findings: list[dict[str, Any]]) -> str:
+    lines = [f"## {REPORT_SECTIONS[3]}", ""]
+    if not findings:
+        lines.append("No rule flagged anything: no notable gaps, duplicates, type problems, skew, outliers or "
+                     "strong correlations.")
+    else:
+        counts = {sev: sum(f["severity"] == sev for f in findings) for sev in SEVERITY_ORDER}
+        lines.append("Ranked by how much each one could distort an analysis if ignored: "
+                     + ", ".join(f"{n} {sev}" for sev, n in counts.items() if n) + ". "
+                     "Rule-based: they show where to look, not what it means for your question.")
+        lines.append("")
+        for i, f in enumerate(findings, 1):
+            lines.append(f"{i}. **[{f['severity']}] {f['title']}.** {f['detail']}")
+    lines += ["", INTERPRETATION_MARKER]
+    return "\n".join(lines)
+
+
+def _section_charts(s: dict[str, Any]) -> str:
+    charts = s.get("charts", [])
+    lines = [f"## {REPORT_SECTIONS[4]}"]
+    if not charts:
+        lines += ["", "No charts were produced."]
+    for c in charts:
+        title, text = _chart_text(c, s)
+        lines += ["", f"### {title}", "", text, "", f"![{_alt(title)}]({_link(c['file'])})"]
+    if s.get("charts_skipped"):
+        lines += ["", f"Not drawn because of the chart limit: {', '.join(s['charts_skipped'])}."]
+    return "\n".join(lines)
+
+
+def _chart_text(c: dict[str, Any], s: dict[str, Any]) -> tuple[str, str]:
+    st, q = s["statistics"], s["quality"]
+    analysis = s.get("analysis", {})
+    kind = c["type"]
+    if kind == "histogram_boxplot":
+        col = c["column"]
+        v, o = st.get(col, {}), q["outliers"].get(col, {})
+        text = (f"{c['values']:,} values. Median {_num(v.get('median'))}, mean {_num(v.get('mean'))}, "
+                f"range {_num(v.get('min'))} to {_num(v.get('max'))}")
+        text += f"; {v['skew_label']}." if v.get("skew_label") else "."
+        if o.get("status") == "ok":
+            text += (f" The box plot marks {o['n_outliers']:,} value(s) ({_pct(o['outlier_pct'])}) beyond "
+                     "1.5 × IQR." if o["n_outliers"] else " No values beyond 1.5 × IQR.")
+        return f"Distribution of {code(col)}", text
+    if kind == "histogram_log":
+        return (f"Distribution of {code(c['column'])}, log scale",
+                "The same values on a log axis. Each ×10 step gets the same width, so the long right tail "
+                "spreads out and the shape of the bulk of the data becomes visible.")
+    if kind == "missing_values":
+        cols = [x for x in q["missing"]["columns"] if x["name"] in c["columns"]]
+        worst = max(cols, key=lambda x: x["missing_pct"]) if cols else None
+        text = f"{_plural(len(c['columns']), 'column has', 'columns have')} gaps"
+        text += f"; the most is {code(worst['name'])} with {_pct(worst['missing_pct'])} missing." if worst else "."
+        return "Missing values by column", text
+    if kind == "correlation_heatmap":
+        pairs = analysis.get("correlations", {}).get("pairs", [])
+        text = f"Pearson r for {len(c['columns'])} numeric columns, each pair shown once."
+        if pairs:
+            p = pairs[0]
+            text += (f" Strongest pair: {code(p['a'])} and {code(p['b'])} "
+                     f"(r = {_num(p['pearson'], 2)}, ρ = {_num(p['spearman'], 2)}, {p['strength']}).")
+        if c.get("note"):
+            text += f" {_sentence(c['note'])}"
+        return "Correlation heatmap", text
+    if kind == "scatter":
+        a, b = c["columns"]
+        p = next((p for p in analysis.get("correlations", {}).get("pairs", []) if (p["a"], p["b"]) == (a, b)), None)
+        text = ""
+        if p:
+            text = (f"Pearson r = {_num(p['pearson'], 2)}, Spearman ρ = {_num(p['spearman'], 2)} "
+                    f"({p['strength']}, {p['direction']}), n = {p['n']:,}.")
+            for note in p.get("notes", []):
+                text += f" {_sentence(note)}"
+        if c.get("sampled"):
+            text += f" A random sample of {c['points_shown']:,} points is shown."
+        return f"{code(b)} vs {code(a)}", text.strip() or "Scatter plot."
+    if kind == "top_categories":
+        col = c["column"]
+        cs = analysis.get("categorical", {}).get(col, {})
+        cats = cs.get("categories", [])
+        text = f"{_plural(cs.get('unique', 0), 'distinct value', 'distinct values')}."
+        if cats:
+            text += f" Most common: {code(cats[0]['value'])} ({_pct(cats[0]['pct'])})."
+            other = cs.get("other", {})
+            if other.get("count"):
+                text += (f" The top {len(cats)} cover {_pct(100 - other['pct'])} of non-missing rows; "
+                         f"{_plural(other['categories'], 'rarer value is', 'rarer values are')} grouped as Other.")
+            elif len(cats) > 1:
+                text += " Every value is shown."
+        return f"Most common values of {code(col)}", text
+    return kind.replace("_", " ").capitalize(), ""
+
+
+def _section_next_steps(s: dict[str, Any], findings: list[dict[str, Any]]) -> str:
+    lines = [f"## {REPORT_SECTIONS[5]}", "", "### Cleaning options", ""]
+    options = cleaning_options(findings)
+    if options:
+        lines.append("Nothing has been changed. Each option has a cost; choose deliberately and write the "
+                     "result to a new file, never over the original.")
+        lines.append("")
+        for o in options:
+            cols = f" ({_codes(o['columns'][:6])}{', ...' if len(o['columns']) > 6 else ''})" if o["columns"] else ""
+            lines.append(f"- **{o['problem']}**{cols}: {o['options']} *Cost:* {o['cost']}")
+    else:
+        lines.append("No cleaning is suggested by the checks.")
+    lines += ["", "### Further analysis", ""]
+    lines += [f"- {x}" for x in analysis_suggestions(s, findings)]
+    return "\n".join(lines)
+
+
+def _section_limitations(s: dict[str, Any]) -> str:
+    return "\n".join([f"## {REPORT_SECTIONS[6]}", "", *[f"- {x}" for x in limitations(s)]])
+
+
+# --------------------------------------------------------------------------
+# Markdown helpers (decision D6: no tabulate)
+# --------------------------------------------------------------------------
+
+
+def md_table(headers: list[str], rows: list[list[Any]]) -> str:
+    """GitHub-flavoured Markdown table. Numeric columns are right-aligned."""
+    numeric = [
+        all(isinstance(r[i], (int, float)) and not isinstance(r[i], bool) for r in rows if r[i] is not None)
+        and any(r[i] is not None for r in rows)
+        for i in range(len(headers))
+    ]
+    out = ["| " + " | ".join(_cell(h) for h in headers) + " |",
+           "|" + "|".join("---:" if n else "---" for n in numeric) + "|"]
+    for r in rows:
+        out.append("| " + " | ".join(_cell(_num(c) if isinstance(c, (int, float)) and not isinstance(c, bool)
+                                           else c) for c in r) + " |")
+    return "\n".join(out)
+
+
+def code(text: Any) -> str:
+    """Inline code that survives backticks, pipes and line breaks inside the text."""
+    t = str(text).replace("\r", " ").replace("\n", " ")
+    if "`" not in t:
+        return f"`{t}`" if t else "` `"
+    return f"`` {t} ``"
+
+
+def _cell(x: Any) -> str:
+    if x is None:
+        return "–"
+    return str(x).replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+
+
+def _num(x: Any, digits: int = 4) -> str:
+    """1,234 / 12.35 / 0.0123; '–' for missing values."""
+    if x is None:
+        return "–"
+    if isinstance(x, bool):
+        return str(x)
+    if isinstance(x, int):
+        return f"{x:,}"
+    x = float(x)
+    if x.is_integer() and abs(x) < 1e15:
+        return f"{int(x):,}"
+    if abs(x) >= 10 ** digits:
+        return f"{x:,.0f}"
+    return f"{x:,.{digits}g}"
+
+
+def _pct(p: float | None) -> str:
+    if p is None:
+        return "–"
+    if 0 < p < 0.1:
+        return "<0.1%"
+    if 99.9 < p < 100:
+        return ">99.9%"
+    return f"{p:.1f}%"
+
+
+def _plural(n: int, one: str, many: str) -> str:
+    return f"{n:,} {one if n == 1 else many}"
+
+
+def _codes(names: list[Any]) -> str:
+    return ", ".join(code(n) for n in names)
+
+
+def _examples(values: list[str]) -> str:
+    return ", ".join(code(_unrepr(v)) for v in values[:5])
+
+
+def _unrepr(v: str) -> str:
+    """inspect_data stores example values as repr() strings ("'abc'"); show them without quotes."""
+    s = str(v)
+    if len(s) >= 2 and s[0] == s[-1] and s[0] in "'\"":
+        return s[1:-1]
+    return s
+
+
+def _sentence(text: str) -> str:
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    text = text[0].upper() + text[1:]
+    return text if text.endswith((".", "!", "?")) else text + "."
+
+
+def _delim(d: Any) -> str:
+    return {"\t": "tab", ",": ",", ";": ";", "|": "|"}.get(d, str(d))
+
+
+def _bytes(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB"):
+        if size < 1024 or unit == "GB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} GB"
+
+
+def _alt(title: str) -> str:
+    return title.replace("`", "").replace("[", "(").replace("]", ")")
+
+
+def _link(path: str) -> str:
+    """Relative link; spaces and parentheses would break Markdown image syntax."""
+    return path.replace(" ", "%20").replace("(", "%28").replace(")", "%29")

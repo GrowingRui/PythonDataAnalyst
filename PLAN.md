@@ -108,7 +108,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
-## Phase 5: Report generation ⬜
+## Phase 5: Report generation ✅
 
 **Goal:** a structured Markdown report plus machine-readable JSON.
 
@@ -164,3 +164,4 @@ We build this in small phases. Each phase ends with a review: you check the resu
 - 2026-11-05: Phase 3 built: `missing_values`, `find_duplicates`, `detect_type_issues`, `iqr_outliers`, `data_quality`, `--key` option, 71 passing tests. Additions beyond the plan: `untrimmed_whitespace` as its own issue, day/month order detection for text dates, currency/%/decimal-comma handling for numbers-as-text, and sampling for date detection on columns with more than 5,000 distinct values.
 - 2026-11-05: Phase 3 approved, committed and pushed. Phase 4 built: `generate_eda.py` (correlations, categorical summary, 5 chart types, `--max-categories`/`--max-scatter-points`/`--max-charts`, writes `summary.json`), 97 passing tests. Additions beyond the plan: likely-ID columns are excluded from charts and correlations, Pearson-vs-Spearman gap and low-n notes on each pair, the output folder must be new or empty (never overwrites). Histogram and box plot share one PNG per column.
 - 2026-11-05: Phase 4 approved with one addition: a log-scale histogram for highly skewed positive columns. 99 passing tests. Committed and pushed.
+- 2026-11-05: Phase 5 built: `report.py` (rule-based findings with high/medium/low severity, `report.md` in 7 sections, cleaning options with their costs, analysis suggestions, limitations), called at the end of `generate_eda.py`; `summary.json` gains `findings`. 121 passing tests. Additions beyond the plan: the input file's SHA-256 is recorded before and checked after every run (the CLI exits with an error if it changed), `--key` columns are treated as IDs, findings also cover duplicate keys, placeholder values, type problems, nearly constant columns, outliers and near-duplicate columns (|r| ≥ 0.98), and the report leaves a marked spot for Claude's "Analyst interpretation".
