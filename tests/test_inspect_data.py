@@ -113,7 +113,7 @@ def test_header_only_file(header_only):
         load_dataset(header_only)
 
 
-@pytest.mark.parametrize("name", ["data.json", "data.parquet", "data"])
+@pytest.mark.parametrize("name", ["data.feather", "data.xml", "data"])
 def test_unsupported_format(tmp_path, name):
     path = tmp_path / name
     path.write_text("{}")

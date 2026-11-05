@@ -1,9 +1,10 @@
-"""Load a CSV/TSV/Excel dataset, describe it and check its quality (read-only).
+"""Load a CSV/TSV/Excel/Parquet/JSON dataset, describe it and check its quality (read-only).
 
 Usage:
     python inspect_data.py data.csv
     python inspect_data.py data.xlsx --sheet "2025" --json
     python inspect_data.py orders.csv --key order_id
+    python inspect_data.py export.json --json-path data.orders
 
 The input file is only ever read, never written.
 """
@@ -12,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import decimal
 import json
 import math
 import sys
@@ -25,7 +27,15 @@ import pandas as pd
 
 CSV_EXTENSIONS = {".csv", ".tsv", ".txt"}
 EXCEL_EXTENSIONS = {".xlsx", ".xlsm"}
-SUPPORTED_EXTENSIONS = CSV_EXTENSIONS | EXCEL_EXTENSIONS
+PARQUET_EXTENSIONS = {".parquet", ".pq"}
+JSON_EXTENSIONS = {".json"}
+JSONL_EXTENSIONS = {".jsonl", ".ndjson"}
+SUPPORTED_EXTENSIONS = CSV_EXTENSIONS | EXCEL_EXTENSIONS | PARQUET_EXTENSIONS | JSON_EXTENSIONS | JSONL_EXTENSIONS
+# Nested JSON objects become columns joined with this separator:
+# {"customer": {"city": ...}} gives the column "customer.city".
+JSON_SEP = "."
+# How deep to look for lists of records when a JSON file is a single object.
+JSON_SEARCH_DEPTH = 4
 
 # Tried in this order. "utf-8-sig" is UTF-8 that also strips a byte-order mark
 # (Excel adds one when it saves "CSV UTF-8"). cp1252 is the classic Windows
@@ -76,11 +86,14 @@ def load_dataset(
     sheet: str | None = None,
     encoding: str | None = None,
     delimiter: str | None = None,
+    json_path: str | None = None,
 ) -> pd.DataFrame:
-    """Read a CSV, TSV or Excel file into a DataFrame.
+    """Read a CSV, TSV, Excel, Parquet, JSON or JSON Lines file into a DataFrame.
 
-    How the file was read (encoding, delimiter, sheet) is stored in
-    ``df.attrs["source"]`` so the report can say so.
+    How the file was read (encoding, delimiter, sheet, ...) is stored in
+    ``df.attrs["source"]`` so the report can say so. Lists and objects inside
+    cells (JSON, Parquet) are kept as JSON text so they can be counted; the
+    columns that hold them are listed in ``source["nested_columns"]``.
     """
     path = Path(path)
     if not path.exists():
@@ -100,11 +113,18 @@ def load_dataset(
     if path.stat().st_size == 0:
         raise DatasetError(f"The file is empty (0 bytes): {path}")
 
+    if sheet is not None and ext not in EXCEL_EXTENSIONS:
+        raise DatasetError("--sheet only applies to Excel files.")
+    if json_path is not None and ext not in JSON_EXTENSIONS:
+        raise DatasetError("--json-path only applies to .json files.")
+
     if ext in EXCEL_EXTENSIONS:
         df, source = _read_excel(path, sheet)
+    elif ext in PARQUET_EXTENSIONS:
+        df, source = _read_parquet(path)
+    elif ext in JSON_EXTENSIONS | JSONL_EXTENSIONS:
+        df, source = _read_json(path, encoding, json_path, lines=ext in JSONL_EXTENSIONS)
     else:
-        if sheet is not None:
-            raise DatasetError("--sheet only applies to Excel files.")
         df, source = _read_csv(path, encoding, delimiter)
 
     if df.shape[1] == 0:
@@ -112,6 +132,9 @@ def load_dataset(
     if df.shape[0] == 0:
         raise DatasetError(f"{path.name} has column headers but no data rows.")
 
+    nested = _freeze_nested(df)
+    if nested:
+        source["nested_columns"] = nested
     source.update({"path": str(path), "file_name": path.name, "file_bytes": path.stat().st_size})
     df.attrs["source"] = source
     return df
@@ -164,6 +187,198 @@ def _read_csv(path: Path, encoding: str | None, delimiter: str | None) -> tuple[
         f"Could not decode {path.name} with any of: {', '.join(encodings)} "
         f"({'; '.join(errors)}). Pass the right one with --encoding, e.g. --encoding latin-1."
     )
+
+
+def _read_parquet(path: Path) -> tuple[pd.DataFrame, dict]:
+    try:
+        import pyarrow  # noqa: F401  (pandas needs it to read Parquet)
+    except ImportError as exc:
+        raise DatasetError(
+            "Reading Parquet files needs the 'pyarrow' package. "
+            "Install it with: pip install pyarrow"
+        ) from exc
+    try:
+        df = pd.read_parquet(path, engine="pyarrow")
+    except Exception as exc:  # corrupt or not really a Parquet file
+        raise DatasetError(f"Could not read {path.name} as a Parquet file: {exc}") from exc
+    # Parquet DECIMAL columns arrive as Python Decimal objects, which pandas
+    # treats as text. Analyse them as floats (in memory only).
+    decimals = [str(c) for c in df.columns if _all_decimals(df[c])]
+    for c in decimals:
+        df[c] = df[c].astype(float)
+    source: dict[str, Any] = {"format": "parquet", "stored_types": True}
+    if decimals:
+        source["decimal_columns"] = decimals
+    return df, source
+
+
+def _all_decimals(s: pd.Series) -> bool:
+    non_null = s.dropna()
+    return (s.dtype == object and not non_null.empty
+            and bool(non_null.map(lambda v: isinstance(v, decimal.Decimal)).all()))
+
+
+def _read_json(path: Path, encoding: str | None, json_path: str | None, lines: bool) -> tuple[pd.DataFrame, dict]:
+    enc = encoding or "utf-8-sig"
+    try:
+        text = path.read_text(encoding=enc)
+    except LookupError as exc:
+        raise DatasetError(f"Unknown encoding {enc!r}.") from exc
+    except UnicodeDecodeError as exc:
+        raise DatasetError(
+            f"Could not decode {path.name} as {enc} ({exc.reason} at byte {exc.start}). "
+            "Pass the right one with --encoding."
+        ) from exc
+
+    layout = "json_lines" if lines else "records"
+    if lines:
+        records = _parse_json_lines(text, path.name)
+    else:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError as exc:
+            if exc.msg != "Extra data" or json_path:
+                raise DatasetError(f"{path.name} is not valid JSON: {exc}") from exc
+            # Several JSON values one after another: JSON Lines saved as .json.
+            records, layout = _parse_json_lines(text, path.name), "json_lines"
+        else:
+            if json_path:
+                data = _follow_json_path(data, json_path, path.name)
+            records = _as_records(data, path.name, json_path)
+
+    if not records:
+        raise DatasetError(f"{path.name} contains no records.")
+    df = pd.json_normalize(records, sep=JSON_SEP)
+    top_keys = {k for r in records for k in r}
+    flattened = [str(c) for c in df.columns if c not in top_keys]
+    source: dict[str, Any] = {"format": "json", "layout": layout, "encoding": enc}
+    if json_path:
+        source["json_path"] = json_path
+    if flattened:
+        source["flattened_columns"] = flattened
+    return df, source
+
+
+def _parse_json_lines(text: str, name: str) -> list[dict]:
+    records = []
+    decoder = json.JSONDecoder()
+    for n, line in enumerate(text.splitlines(), start=1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            value, end = decoder.raw_decode(line)
+        except json.JSONDecodeError as exc:
+            raise DatasetError(f"Line {n} of {name} is not valid JSON: {exc.msg}.") from exc
+        if line[end:].strip():
+            raise DatasetError(f"Line {n} of {name} holds more than one JSON value; "
+                               "JSON Lines needs exactly one record per line.")
+        if not isinstance(value, dict):
+            raise DatasetError(f"Line {n} of {name} is a {_json_type(value)}, not a record. "
+                               'JSON Lines needs one object such as {"id": 1, ...} per line.')
+        records.append(value)
+    return records
+
+
+def _follow_json_path(data: Any, json_path: str, name: str) -> Any:
+    here: list[str] = []
+    for key in json_path.split("."):
+        where = ".".join(here) or "the top level"
+        if not isinstance(data, dict):
+            raise DatasetError(f"--json-path {json_path}: {where} of {name} is a {_json_type(data)}, "
+                               f"so it has no key {key!r}.")
+        if key not in data:
+            keys = ", ".join(repr(k) for k in list(data)[:20]) or "(none)"
+            raise DatasetError(f"--json-path {json_path}: key {key!r} not found at {where} of {name}. "
+                               f"Keys there: {keys}")
+        data = data[key]
+        here.append(key)
+    return data
+
+
+def _as_records(data: Any, name: str, json_path: str | None) -> list[dict]:
+    """Check that ``data`` is a list of objects (one per row) and return it."""
+    where = f"--json-path {json_path}" if json_path else name
+    if isinstance(data, list):
+        bad = [v for v in data if not isinstance(v, dict)]
+        if not bad:
+            return data
+        if len(bad) == len(data):
+            kinds = " and ".join(sorted({_json_type(v) for v in data}))
+            raise DatasetError(f"{where} is a list of {kinds} values, not of records. A table needs a "
+                               'list of objects such as [{"id": 1, "city": "Rome"}, ...].')
+        raise DatasetError(f"{where} mixes records with other values: {len(bad)} of {len(data)} items "
+                           f"are not objects (first one: {json.dumps(bad[0])[:80]}).")
+    if isinstance(data, dict):
+        keys = ", ".join(repr(k) for k in list(data)[:10])
+        msg = f"{where} is a single JSON object ({'keys: ' + keys if keys else 'empty'}), not a table of records."
+        found = _find_record_lists(data, json_path + "." if json_path else "")
+        if found:
+            places = ", ".join(f"{p} ({n:,} records)" for p, n in found[:5])
+            msg += f" Lists of records found at: {places}. Choose one with --json-path {found[0][0]}"
+        raise DatasetError(msg)
+    raise DatasetError(f"{where} is a single {_json_type(data)} value, not a table of records.")
+
+
+def _find_record_lists(data: dict, prefix: str = "", depth: int = 0) -> list[tuple[str, int]]:
+    """Paths (a.b.c) to non-empty lists of objects inside ``data``, largest first."""
+    found: list[tuple[str, int]] = []
+    if depth >= JSON_SEARCH_DEPTH:
+        return found
+    for key, value in data.items():
+        if "." in str(key):  # --json-path couldn't address it
+            continue
+        here = f"{prefix}{key}"
+        if isinstance(value, list) and value and all(isinstance(v, dict) for v in value):
+            found.append((here, len(value)))
+        elif isinstance(value, dict):
+            found += _find_record_lists(value, here + ".", depth + 1)
+    return sorted(found, key=lambda t: -t[1])
+
+
+def _json_type(value: Any) -> str:
+    if isinstance(value, dict):
+        return "object"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, bool):
+        return "true/false"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "text"
+    return "null"
+
+
+def _freeze_nested(df: pd.DataFrame) -> dict[str, int]:
+    """Replace lists, arrays and dicts in cells with their JSON text, in place.
+
+    pandas can't count, compare or deduplicate such values (they aren't
+    hashable), so every summary would fail on them. As text they can still be
+    counted, and the quality checks report the column as a type problem.
+    Returns {column: number of nested values}.
+    """
+    nested: dict[str, int] = {}
+    for c in df.columns:
+        if df[c].dtype != object:
+            continue
+        mask = df[c].map(lambda v: isinstance(v, (list, tuple, dict, np.ndarray))).astype(bool)
+        if mask.any():
+            df[c] = df[c].where(~mask, df[c][mask].map(_to_json_text))
+            nested[str(c)] = int(mask.sum())
+    return nested
+
+
+def _to_json_text(value: Any) -> str:
+    def plain(v: Any) -> Any:
+        if isinstance(v, np.ndarray):
+            return [plain(x) for x in v.tolist()]
+        if isinstance(v, (list, tuple)):
+            return [plain(x) for x in v]
+        if isinstance(v, dict):
+            return {str(k): plain(x) for k, x in v.items()}
+        return v
+    return json.dumps(plain(value), ensure_ascii=False, default=str)
 
 
 def _sniff_delimiter(path: Path, encoding: str) -> str:
@@ -450,13 +665,26 @@ def detect_type_issues(
       mixed_types          one column holds several Python types (common in Excel)
       inconsistent_labels  the same label written differently ("North" / "north ")
       untrimmed_whitespace values with spaces at the start or end
+      nested_values        lists or objects inside cells (JSON, Parquet), kept as JSON text
     """
     kinds = kinds or classify_columns(df)
+    nested = df.attrs.get("source", {}).get("nested_columns", {})
     issues: list[dict[str, Any]] = []
     for name in df.columns:
         key = str(name)
         s = df[name]
         if kinds[key] not in ("categorical", "text"):
+            continue
+        if key in nested:
+            # The text checks (numbers, dates, labels) make no sense on JSON text.
+            n, total = nested[key], int(s.notna().sum())
+            examples = [v for v in s.dropna().unique() if isinstance(v, str) and v[:1] in "[{"]
+            issues.append(
+                {"column": key, "issue": "nested_values", "count": n,
+                 "detail": f"{n} of {total} values are lists or objects, kept as JSON text; they can be "
+                           "counted but not summarised as numbers or categories",
+                 "examples": [repr(v if len(v) <= 60 else v[:57] + "...") for v in examples[:max_examples]]}
+            )
             continue
 
         mixed = _mixed_types(s)
@@ -778,19 +1006,37 @@ def _table(headers: list[str], rows: list[list[Any]]) -> str:
     return "\n".join([line, sep, *body])
 
 
+def source_description(src: dict[str, Any]) -> str:
+    """How the file was read, in a few words (plain text)."""
+    fmt = src.get("format")
+    if fmt == "excel":
+        return f"Excel, sheet {src.get('sheet')!r} of {len(src.get('available_sheets', []))}"
+    if fmt == "csv":
+        return f"text, encoding {src.get('encoding')}, delimiter {src.get('delimiter')!r}"
+    if fmt == "parquet":
+        return "Parquet, column types stored in the file"
+    if fmt == "json":
+        how = "JSON Lines" if src.get("layout") == "json_lines" else "JSON list of records"
+        if src.get("json_path"):
+            how += f" at {src['json_path']}"
+        return how
+    return "in-memory data"
+
+
 def format_text(result: dict[str, Any]) -> str:
     """Human-readable version of describe_dataset()."""
     src, ov, st = result["source"], result["overview"], result["statistics"]
     out: list[str] = []
 
-    how = (
-        f"sheet {src.get('sheet')!r} of {len(src.get('available_sheets', []))}"
-        if src.get("format") == "excel"
-        else f"encoding {src.get('encoding')}, delimiter {src.get('delimiter')!r}"
-    )
-    out.append(f"DATASET  {src.get('file_name', '?')}  ({how})")
+    out.append(f"DATASET  {src.get('file_name', '?')}  ({source_description(src)})")
     kinds = ", ".join(f"{v} {k}" for k, v in ov["kind_counts"].items())
     out.append(f"{ov['rows']:,} rows x {ov['columns']} columns  |  memory {ov['memory_human']}  |  {kinds}")
+    if src.get("flattened_columns"):
+        out.append("Flattened from nested objects: " + ", ".join(src["flattened_columns"]))
+    if src.get("nested_columns"):
+        out.append("Lists/objects kept as JSON text: " + ", ".join(src["nested_columns"]))
+    if src.get("decimal_columns"):
+        out.append("Parquet decimals analysed as floats: " + ", ".join(src["decimal_columns"]))
     out.append("")
 
     out.append("COLUMNS")
@@ -904,11 +1150,17 @@ def _format_quality(q: dict[str, Any]) -> list[str]:
 # --------------------------------------------------------------------------
 
 
+DATASET_HELP = "dataset file (.csv, .tsv, .txt, .xlsx, .xlsm, .parquet, .json, .jsonl)"
+JSON_PATH_HELP = "dot-separated key that holds the records in a .json file, e.g. data.orders"
+ENCODING_HELP = "text encoding for CSV/JSON files (default: CSV tries utf-8, then cp1252; JSON utf-8)"
+
+
 def build_parser() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(description="Load a CSV/TSV/Excel file and describe it (read-only).")
-    p.add_argument("path", help="dataset file (.csv, .tsv, .txt, .xlsx, .xlsm)")
+    p = argparse.ArgumentParser(description="Load a dataset file and describe it (read-only).")
+    p.add_argument("path", help=DATASET_HELP)
     p.add_argument("--sheet", help="Excel sheet name (default: first sheet)")
-    p.add_argument("--encoding", help="text encoding for CSV files (default: try utf-8, then cp1252)")
+    p.add_argument("--json-path", help=JSON_PATH_HELP)
+    p.add_argument("--encoding", help=ENCODING_HELP)
     p.add_argument("--delimiter", help="CSV delimiter (default: detected automatically)")
     p.add_argument("--top", type=int, default=5, help="top values shown per categorical column (default 5)")
     p.add_argument("--key", help="comma-separated key columns for an extra duplicate check, e.g. order_id")
@@ -926,7 +1178,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     delimiter = args.delimiter.encode().decode("unicode_escape") if args.delimiter else None  # allow "\t"
     try:
-        df = load_dataset(args.path, sheet=args.sheet, encoding=args.encoding, delimiter=delimiter)
+        df = load_dataset(args.path, sheet=args.sheet, encoding=args.encoding, delimiter=delimiter,
+                          json_path=args.json_path)
         keys = [k.strip() for k in args.key.split(",")] if args.key else None
         result = describe_dataset(df, top_n=args.top, key_columns=keys)
     except DatasetError as exc:

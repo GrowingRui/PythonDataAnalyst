@@ -8,8 +8,8 @@ analyst's answer, backed by tested code: data quality problems, descriptive
 statistics, correlations, charts and a written report. Your file is never
 changed.
 
-The skill works on CSV, TSV and Excel files with pandas, NumPy, Matplotlib and
-Seaborn. The agent runs two scripts that compute every number, then reads the
+The skill works on CSV, TSV, Excel, Parquet and JSON files with pandas, NumPy,
+Matplotlib and Seaborn. The agent runs two scripts that compute every number, then reads the
 results and the charts and writes the interpretation.
 
 It's written in the open [Agent Skills](https://agentskills.io/) format, so it
@@ -36,12 +36,13 @@ support skills, such as OpenAI Codex, Gemini CLI, GitHub Copilot or Cursor.
 ## What it does
 
 - **Loads messy files robustly:** detects the delimiter, falls back from
-  UTF-8 to Windows-1252, picks Excel sheets and explains clearly when a file
-  can't be read.
+  UTF-8 to Windows-1252, picks Excel sheets, flattens nested JSON into
+  `parent.child` columns and explains clearly when a file can't be read
+  (including JSON that isn't a table, with the paths where records were found).
 - **Checks data quality:**
   - missing values, including placeholders such as `-` or `unknown`
   - exact duplicates and repeated keys
-  - numbers or dates stored as text, mixed types
+  - numbers or dates stored as text, mixed types, lists inside cells
   - inconsistent labels (`North` / `north `)
   - IQR outliers, and numeric codes such as `999`
 - **Describes the data:** statistics per column type, skewness, top
@@ -61,8 +62,9 @@ support skills, such as OpenAI Codex, Gemini CLI, GitHub Copilot or Cursor.
 
 ## Install
 
-You need Python 3.11 or newer with pandas, NumPy, Matplotlib, Seaborn and
-openpyxl, and an agent that can run shell commands.
+You need Python 3.11 or newer with pandas, NumPy, Matplotlib and Seaborn
+(plus openpyxl for Excel and pyarrow for Parquet files), and an agent that can
+run shell commands.
 
 ### Claude Code: install as a plugin (recommended)
 
@@ -134,8 +136,11 @@ Install them in the environment the agent will use. A project virtual
 environment (`.venv`) is picked up automatically.
 
 ```bash
-pip install "pandas>=2.1" "numpy>=1.26" "matplotlib>=3.8" "seaborn>=0.13" "openpyxl>=3.1"
+pip install "pandas>=2.1" "numpy>=1.26" "matplotlib>=3.8" "seaborn>=0.13" "openpyxl>=3.1" "pyarrow>=14"
 ```
+
+openpyxl is only needed for Excel files and pyarrow only for Parquet files;
+leave out the one you don't use.
 
 If a package is missing, the skill tells the agent to ask you before
 installing anything.
@@ -147,6 +152,7 @@ Start a new agent session in your project and ask in plain language:
 - *"Explore `data/sales.csv` and tell me what stands out."*
 - *"Check `customers.xlsx` (sheet `2025`) for data quality problems."*
 - *"Which numeric columns in `survey.csv` have outliers, and should I remove them?"*
+- *"Profile `events.parquet` before I build a dashboard on it."*
 
 Or call the skill by name, with an optional focus. In Claude Code that's
 `/python-data-analyst:python-data-analyst` when installed as a plugin, or
@@ -167,7 +173,8 @@ python skills/python-data-analyst/scripts/generate_eda.py data/sales.csv        
 | Option | Script | Purpose |
 |---|---|---|
 | `--sheet NAME` | both | Excel sheet to read (default: the first) |
-| `--encoding ENC` | both | Force a text encoding, e.g. `latin-1` |
+| `--json-path KEYS` | both | Where the records are in a `.json` file, e.g. `data.orders` for `{"data": {"orders": [...]}}` |
+| `--encoding ENC` | both | Force a text encoding (CSV, JSON), e.g. `latin-1` |
 | `--delimiter ";"` | both | Force a delimiter when detection guesses wrong |
 | `--key COLS` | both | Columns that should be unique, e.g. `order_id`; also checks for repeated keys |
 | `--top N` | inspect | Top values shown per categorical column |
@@ -249,7 +256,8 @@ The design follows a few rules:
   results, so every cleaning step needs an explanation and your agreement.
 - **Progressive disclosure.** The agent reads `SKILL.md` when the skill is used,
   and the reference guides only when a question calls for them.
-- **Few dependencies.** Only pandas, NumPy, Matplotlib, Seaborn and openpyxl.
+- **Few dependencies.** Only pandas, NumPy, Matplotlib and Seaborn, plus
+  openpyxl for Excel and pyarrow for Parquet.
 - **Agent-neutral.** `SKILL.md` uses only the standard fields of the Agent
   Skills format, and the folder works on its own after a plain copy. The
   `.claude-plugin/` files only add the Claude Code plugin install.
@@ -264,6 +272,8 @@ The design follows a few rules:
 | Skewness (adjusted Fisher–Pearson) | Whether a few large or small values pull the mean | The cause |
 | Column type detection | numeric / boolean / datetime / categorical / free text, by rules | It can misclassify; the report shows the result for every column |
 | Placeholder detection | A fixed list (`-`, `?`, `n/a`, `unknown`, ...) and numeric codes like `999` that are outliers | Codes inside the normal range (`0` meaning "no answer") |
+| Parquet's stored types | Typed columns can't hold numbers or dates as text, so fewer type problems are found | That the values are right: the report says why type problems are absent |
+| JSON flattening | Nested objects become `parent.child` columns; lists are counted and reported | The items inside lists: they aren't analysed or charted |
 
 Correlations are computed between numeric columns only, and none of them
 shows cause and effect. Severity labels on findings mean *how much this could
@@ -283,6 +293,7 @@ python -m pytest
 
 The test suite covers:
 - loading and quality checks against known answers,
+- the same sample data as CSV, Parquet, JSON and JSON Lines giving the same findings,
 - the charts and the report,
 - every Python example in the reference guides,
 - an end-to-end run on the sample data that must find every planted problem

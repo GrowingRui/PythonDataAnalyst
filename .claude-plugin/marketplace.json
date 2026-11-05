@@ -8,7 +8,7 @@
     {
       "name": "python-data-analyst",
       "source": "./",
-      "description": "Careful exploratory data analysis of CSV and Excel files: quality checks, statistics, charts and a report. Never changes your data."
+      "description": "Careful exploratory data analysis of CSV, Excel, Parquet and JSON files: quality checks, statistics, charts and a report. Never changes your data."
     }
   ]
 }

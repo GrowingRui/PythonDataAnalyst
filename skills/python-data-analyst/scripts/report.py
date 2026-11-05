@@ -115,6 +115,13 @@ CLEANING_ADVICE: dict[str, tuple[str, str, str]] = {
         "Trim with `.str.strip()`.",
         "Safe in almost every case; only matters when spacing is meaningful (fixed-width codes).",
     ),
+    "nested_values": (
+        "Lists or objects inside cells",
+        "Count the items per row (a new length column); turn the list into one row per item with "
+        "`df.explode(col)` (after `json.loads`) for a separate table; or make one yes/no column per item.",
+        "Exploding repeats every other column once per item, so sums and counts over the exploded table "
+        "inflate. Counting items keeps the rows but drops what the items were.",
+    ),
     "constant_column": (
         "Constant columns",
         "Leave them out of the analysis.",
@@ -352,6 +359,7 @@ def _type_issue_title(i: dict[str, Any]) -> str:
         "mixed_types": f"{col} mixes different value types",
         "inconsistent_labels": f"{col} writes the same label in different ways",
         "untrimmed_whitespace": f"{col} has values with leading or trailing spaces",
+        "nested_values": f"{col} holds lists or nested objects",
     }.get(i["issue"], f"{col}: {i['issue'].replace('_', ' ')}")
 
 
@@ -518,6 +526,15 @@ def limitations(summary: dict[str, Any]) -> list[str]:
         others = [s for s in sheets if s != src.get("sheet")]
         out.append(f"**Only sheet {code(src.get('sheet'))} was analysed.** The file also contains "
                    f"{_codes(others)}.")
+    if src.get("flattened_columns"):
+        out.append(f"**Nested JSON objects were flattened** into {_codes(src['flattened_columns'])}. A key "
+                   "that is absent from some records counts as a missing value there.")
+    if src.get("nested_columns"):
+        out.append(f"**Lists and objects were kept as JSON text** in {_codes(list(src['nested_columns']))}: "
+                   "they are counted, but their items aren't analysed or charted.")
+    if src.get("decimal_columns"):
+        out.append(f"**Decimal columns were analysed as floats** ({_codes(src['decimal_columns'])}); "
+                   "sums of many values can differ from exact decimal arithmetic in the last digits.")
     return out
 
 
@@ -573,6 +590,12 @@ def _section_overview(s: dict[str, Any]) -> str:
         how = f"Excel, sheet {code(src.get('sheet'))}"
     elif src.get("format") == "csv":
         how = f"text, encoding `{src.get('encoding')}`, delimiter {code(_delim(src.get('delimiter')))}"
+    elif src.get("format") == "parquet":
+        how = "Parquet, column types stored in the file"
+    elif src.get("format") == "json":
+        how = "JSON Lines" if src.get("layout") == "json_lines" else "JSON list of records"
+        if src.get("json_path"):
+            how += f" at {code(src['json_path'])}"
     else:
         how = "in-memory data"
     lines = [f"## {REPORT_SECTIONS[0]}", ""]
@@ -582,6 +605,10 @@ def _section_overview(s: dict[str, Any]) -> str:
     lines.append(file_line)
     lines.append(f"- **Size:** {ov['rows']:,} rows × {ov['columns']:,} columns, {ov['memory_human']} in memory")
     lines.append("- **Column kinds:** " + ", ".join(f"{v} {k}" for k, v in ov["kind_counts"].items()))
+    if src.get("flattened_columns"):
+        lines.append(f"- **Flattened from nested objects:** {_codes(src['flattened_columns'])}")
+    if src.get("nested_columns"):
+        lines.append(f"- **Lists or objects kept as JSON text:** {_codes(list(src['nested_columns']))}")
     lines += ["", md_table(
         ["Column", "Kind", "dtype", "Non-missing", "Missing", "Unique"],
         [[code(c["name"]), c["kind"], f"`{c['dtype']}`", c["non_null"], _pct(missing.get(c["name"], 0.0)), c["unique"]]
@@ -633,6 +660,14 @@ def _section_quality(s: dict[str, Any]) -> str:
     else:
         lines.append("None found: no numbers or dates stored as text, mixed types, inconsistent labels or "
                      "stray spaces.")
+    if s.get("source", {}).get("stored_types"):
+        kinds = [c["kind"] for c in s["overview"]["column_info"]]
+        typed = sum(k in ("numeric", "datetime", "boolean") for k in kinds)
+        texts = sum(k in ("categorical", "text") for k in kinds)
+        lines += ["", f"The file stores each column's type. {_plural(typed, 'column', 'columns')} arrived as "
+                      "numbers, dates or true/false, so they can't hold numbers or dates as text. Fewer type "
+                      "problems here is a property of the format, not proof that the values are right; "
+                      f"{_plural(texts, 'text column was', 'text columns were')} checked as usual."]
 
     lines += ["", "### Outliers (IQR method)", ""]
     if q["outliers"]:

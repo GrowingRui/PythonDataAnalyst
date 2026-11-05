@@ -1,11 +1,11 @@
 ---
 name: python-data-analyst
-description: Professional exploratory data analysis (EDA) of CSV and Excel datasets with pandas, NumPy, Matplotlib and Seaborn. Use when the user asks to inspect, profile, explore, summarise or assess the quality of a dataset (.csv, .tsv, .xlsx), find missing values, duplicates, inconsistent types or outliers, compute descriptive statistics or correlations, create charts from tabular data, or write a data analysis report.
+description: Professional exploratory data analysis (EDA) of CSV, Excel, Parquet and JSON datasets with pandas, NumPy, Matplotlib and Seaborn. Use when the user asks to inspect, profile, explore, summarise or assess the quality of a dataset (.csv, .tsv, .xlsx, .parquet, .json, .jsonl), find missing values, duplicates, inconsistent types or outliers, compute descriptive statistics or correlations, create charts from tabular data, or write a data analysis report.
 license: MIT
-compatibility: Needs Python 3.11+ with pandas, NumPy, Matplotlib, Seaborn and OpenPyXL, and an agent that can run shell commands. Viewing images is optional.
+compatibility: Needs Python 3.11+ with pandas, NumPy, Matplotlib and Seaborn (plus OpenPyXL for Excel, PyArrow for Parquet), and an agent that can run shell commands. Viewing images is optional.
 metadata:
   author: GrowingRui
-  version: "1.1.0"
+  version: "1.2.0"
   repository: https://github.com/GrowingRui/PythonDataAnalyst
 ---
 
@@ -55,11 +55,13 @@ narrower (e.g. "just count the missing values").
   (`.venv/Scripts/python` on Windows, `.venv/bin/python` on macOS/Linux),
   otherwise `python` or `python3`.
 - Check the dependencies:
-  `python -c "import pandas, numpy, matplotlib, seaborn, openpyxl"`
+  `python -c "import pandas, numpy, matplotlib, seaborn"`, plus `openpyxl`
+  for Excel or `pyarrow` for Parquet
 - If something is missing, **ask before installing**. Suggest only the
   missing packages from this list (the minimum versions the scripts support):
-  `pip install "pandas>=2.1" "numpy>=1.26" "matplotlib>=3.8" "seaborn>=0.13" "openpyxl>=3.1"`
-  (OpenPyXL is needed only for `.xlsx` files.)
+  `pip install "pandas>=2.1" "numpy>=1.26" "matplotlib>=3.8" "seaborn>=0.13" "openpyxl>=3.1" "pyarrow>=14"`
+  (OpenPyXL is needed only for `.xlsx` files and PyArrow only for
+  `.parquet` files; leave out the one the user's file doesn't need.)
 
 ### Step 3: Inspect the dataset (quick, read-only)
 
@@ -73,11 +75,20 @@ in plain language. Don't paste raw JSON.
 
 If the file doesn't load cleanly, the error message says why. Useful options:
 `--sheet NAME` (Excel), `--encoding ENC` (e.g. `latin-1` when UTF-8 and
-cp1252 both fail), `--delimiter ";"` (when detection guesses wrong).
+cp1252 both fail), `--delimiter ";"` (when detection guesses wrong),
+`--json-path data.orders` (JSON whose records sit under a key; the error
+for such a file lists the paths it found).
 Add `--key order_id` (comma-separated for several columns) to also check
 for duplicate keys, i.e. rows that share an ID but differ elsewhere.
 Always mention the encoding and delimiter the script used if they weren't
 UTF-8 and a comma.
+
+JSON (a list of records, or `.jsonl` with one record per line): nested
+objects become `parent.child` columns, listed as flattened in the output.
+Lists inside records are kept as JSON text and reported as `nested_values`.
+Parquet keeps each column's type, so numbers or dates stored as text can only
+appear in its text columns. Don't present the missing type problems as a sign
+of clean data; the report says the same.
 
 ### Step 4: Run the full EDA
 ```bash
@@ -90,6 +101,7 @@ This creates `eda_output/<dataset>_<timestamp>/` containing `report.md`,
 | Option | Purpose |
 |---|---|
 | `--sheet NAME` | Excel sheet to read (default: first sheet) |
+| `--json-path KEYS` | Where the records are in a `.json` file, e.g. `data.orders` |
 | `--output DIR` | Write results to a different folder |
 | `--max-categories N` | Top-N categories shown per categorical column |
 | `--max-scatter-points N` | Sample size for scatter plots on large data |

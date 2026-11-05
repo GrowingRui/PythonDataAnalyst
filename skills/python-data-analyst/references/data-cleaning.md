@@ -224,6 +224,37 @@ Usually a numeric column with a few notes ("approx. 5", "see email"). Decide
 per value: convert, set missing, or move the note to its own column. Cost:
 the odd values change meaning or disappear.
 
+### Lists and nested objects
+
+Finding rule: `nested_values`.
+
+JSON and Parquet cells can hold a list (`["red", "blue"]`) or an object. The
+scripts keep these as JSON text so they can be counted, but a list isn't a
+category or a number. Pick the shape the question needs:
+
+```python
+import json
+
+orders = pd.DataFrame({"order_id": [1, 2, 3], "revenue": [30.0, 12.5, 8.0],
+                       "tags": ['["gift", "express"]', '["gift"]', None]})
+tags = orders["tags"].map(json.loads, na_action="ignore")
+
+# Keep one row per order: count the items.
+orders["n_tags"] = tags.str.len()
+
+# One yes/no column per item, still one row per order.
+has_gift = tags.map(lambda t: "gift" in t, na_action="ignore")
+
+# One row per item, as a separate table. Never sum `revenue` here: it repeats.
+order_tags = orders[["order_id"]].assign(tag=tags).explode("tag")
+```
+
+Cost: exploding repeats every other column once per item, so totals over the
+exploded table count an order several times; keep it as its own table keyed
+by the ID. Counting items keeps one row per record but drops what the items
+were. Lists that are missing and lists that are empty (`[]`) mean different
+things: check which ones the file has before treating them alike.
+
 ### Inconsistent labels and stray spaces
 
 Finding rules: `inconsistent_labels`, `untrimmed_whitespace`.

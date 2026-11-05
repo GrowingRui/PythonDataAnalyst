@@ -5,3 +5,4 @@ numpy>=1.26
 matplotlib>=3.8
 seaborn>=0.13
 openpyxl>=3.1   # needed only for reading .xlsx / .xlsm files
+pyarrow>=14     # needed only for reading .parquet files

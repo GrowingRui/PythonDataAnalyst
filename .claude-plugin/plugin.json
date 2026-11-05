@@ -1,12 +1,12 @@
 {
   "name": "python-data-analyst",
-  "version": "1.1.0",
-  "description": "Careful exploratory data analysis (EDA) of CSV and Excel files with pandas, NumPy, Matplotlib and Seaborn: data quality checks, statistics, charts and a Markdown report. Never changes your data.",
+  "version": "1.2.0",
+  "description": "Careful exploratory data analysis (EDA) of CSV, Excel, Parquet and JSON files with pandas, NumPy, Matplotlib and Seaborn: data quality checks, statistics, charts and a Markdown report. Never changes your data.",
   "author": {
     "name": "GrowingRui"
   },
   "homepage": "https://github.com/GrowingRui/PythonDataAnalyst",
   "repository": "https://github.com/GrowingRui/PythonDataAnalyst",
   "license": "MIT",
-  "keywords": ["data-analysis", "eda", "pandas", "csv", "excel", "data-quality"]
+  "keywords": ["data-analysis", "eda", "pandas", "csv", "excel", "parquet", "json", "data-quality"]
 }

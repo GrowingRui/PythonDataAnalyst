@@ -4,6 +4,7 @@ Usage:
     python generate_eda.py data.csv
     python generate_eda.py data.xlsx --sheet 2025 --output results/
     python generate_eda.py big.csv --max-categories 8 --max-scatter-points 3000
+    python generate_eda.py export.json --json-path data.orders
 
 Writes a new folder (default ./eda_output/<dataset>_<timestamp>/) containing
 report.md, summary.json and charts/*.png. The input file is only ever read; its
@@ -33,6 +34,9 @@ from matplotlib.ticker import FuncFormatter, MaxNLocator  # noqa: E402
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from inspect_data import (  # noqa: E402
+    DATASET_HELP,
+    ENCODING_HELP,
+    JSON_PATH_HELP,
     DatasetError,
     classify_columns,
     describe_dataset,
@@ -551,9 +555,11 @@ def run_eda(
             plan.append(("numeric", c))
             if needs_log_view(df[c]):
                 plan.append(("numeric_log", c))
-    # Dates stored as text look categorical, but "most common dates" says nothing.
-    text_dates = {i["column"] for i in summary["quality"]["type_issues"] if i["issue"] == "dates_as_text"}
-    plan += [("categories", c) for c in cats if c not in text_dates]
+    # Dates stored as text look categorical, but "most common dates" says nothing;
+    # neither does "most common lists" for lists kept as JSON text.
+    no_chart = {i["column"] for i in summary["quality"]["type_issues"]
+                if i["issue"] in ("dates_as_text", "nested_values")}
+    plan += [("categories", c) for c in cats if c not in no_chart]
 
     charts: list[dict[str, Any]] = []
     skipped: list[str] = []
@@ -656,9 +662,10 @@ def _matrix(m: pd.DataFrame) -> dict[str, dict[str, float | None]]:
 
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="Run exploratory data analysis and save charts (read-only).")
-    p.add_argument("path", help="dataset file (.csv, .tsv, .txt, .xlsx, .xlsm)")
+    p.add_argument("path", help=DATASET_HELP)
     p.add_argument("--sheet", help="Excel sheet name (default: first sheet)")
-    p.add_argument("--encoding", help="text encoding for CSV files (default: try utf-8, then cp1252)")
+    p.add_argument("--json-path", help=JSON_PATH_HELP)
+    p.add_argument("--encoding", help=ENCODING_HELP)
     p.add_argument("--delimiter", help="CSV delimiter (default: detected automatically)")
     p.add_argument("--key", help="comma-separated key columns for the duplicate-key check")
     p.add_argument("--output", help="output folder (default: eda_output/<dataset>_<timestamp>/)")
@@ -687,7 +694,8 @@ def main(argv: list[str] | None = None) -> int:
     delimiter = args.delimiter.encode().decode("unicode_escape") if args.delimiter else None
     dataset = Path(args.path)
     try:
-        df = load_dataset(dataset, sheet=args.sheet, encoding=args.encoding, delimiter=delimiter)
+        df = load_dataset(dataset, sheet=args.sheet, encoding=args.encoding, delimiter=delimiter,
+                          json_path=args.json_path)
         out_dir = Path(args.output) if args.output else default_output_dir(dataset)
         keys = [k.strip() for k in args.key.split(",")] if args.key else None
         summary = run_eda(df, out_dir, key_columns=keys, max_categories=args.max_categories,

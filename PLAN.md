@@ -17,7 +17,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 | D3 | Reports go to `./eda_output/<dataset>_<timestamp>/`, and `--output` overrides that. | The original dataset is never touched, and every run gets its own folder. |
 | D4 | Scripts output facts (JSON/Markdown), and Claude writes the conclusions. | The numbers come from tested code. The commentary fits each dataset. |
 | D5 | Read-only by default. Problems are flagged, never fixed automatically. | Removing outliers or missing values changes the results, so each change needs an explanation and the user's consent. |
-| D6 | No extra dependencies beyond pandas, NumPy, Matplotlib, Seaborn, OpenPyXL and pytest. For example, we write our own Markdown table function so we don't need `tabulate`. | Easier for other people to install. |
+| D6 | No extra dependencies beyond pandas, NumPy, Matplotlib, Seaborn, OpenPyXL and pytest. For example, we write our own Markdown table function so we don't need `tabulate`. Extended in Phase 11: PyArrow as an **optional** dependency, needed only for Parquet (like OpenPyXL for Excel). | Easier for other people to install. |
 | D7 | Charts use one consistent, colorblind-checked palette: one color for single-series charts and a blue↔red diverging scale with a gray midpoint for correlations. Extended in Phase 6: a fixed 8-color order for unordered groups and a light→dark blue scale for ordered groups (`references/visualization-guide.md`). | Charts stay readable and look consistent. |
 | D8 | Personal use is optional. Users install the skill only in the projects where they want it. | You don't need it all the time. A skill costs only its one-line description until it's used. |
 | D9 | The skill lives in a neutral `skills/python-data-analyst/` folder (moved from `.claude/skills/` in Phase 9). The repo root is also a Claude Code plugin and marketplace (`.claude-plugin/`). | One copy works in every agent; Claude Code users install it as a plugin, others copy the folder. |
@@ -210,7 +210,7 @@ Order: trigger tests come first, because every later phase changes `SKILL.md`, a
 
 **Done when:** the suite runs with one command and the current description passes at least 11 of 12 in each group.
 
-## Phase 11: Parquet and JSON input ⬜
+## Phase 11: Parquet and JSON input ✅
 
 **Goal:** the skill reads `.parquet`, `.json` and `.jsonl` files as well as CSV and Excel.
 
@@ -224,7 +224,7 @@ Order: trigger tests come first, because every later phase changes `SKILL.md`, a
 
 **You will learn:** columnar vs. row-based formats, why Parquet keeps types and CSV doesn't, and nested data.
 
-**Decision needed (changes D6):** add `pyarrow` as an **optional** dependency (recommended; it's the standard Parquet library for pandas), or leave out Parquet and do JSON only (no new dependency).
+**Decision (approved, changes D6):** add `pyarrow` as an **optional** dependency.
 
 **Done when:** the same sample data saved as Parquet, JSON and JSONL gives the same findings as the CSV, apart from the type problems that Parquet keeps from happening at all.
 
@@ -324,3 +324,5 @@ Order: trigger tests come first, because every later phase changes `SKILL.md`, a
 - 2026-11-05: Phases 10-14 proposed (trigger tests, Parquet/JSON input, time trends, `--target`, cleaning script). Waiting for approval and the open decisions.
 - 2026-11-05: Phases 10-14 approved with the recommended decisions. Phase 10 built: `claude plugin eval` (Claude Code 2.1.318) already runs this kind of test, so there's no own runner, only `evals/make_cases.py` (one list of 12 should-trigger and 12 should-not prompts, generating one `case.yaml` per case with a `tool_used: Skill` grader) and `evals/run_triggers.py` (runs the suite and writes `evals/results/<date>-triggers.md`). Prompts that name a file get it in their sandbox: the eval tool only runs a scaffold script inside the case folder, so the generator copies `setup.sh` and the file from `evals/_fixtures/` into each case, and `tests/test_evals.py` (30 tests, no API needed) checks the copies and cases match the generator. Runs are capped at 3 turns with read-only tools, and `--ablation none` (no without-plugin arm, it can't trigger anyway). First full run: 12 of 12 in both groups, 72 of 72 runs right, 5 minutes, priced at $5.78 (counted against the Pro subscription, not billed). Fixed on the way: the summary crashed when printed on a Windows console (the ≥ sign). The version wasn't raised: nothing in the skill changed. 202 passing tests.
 - 2026-11-05: Phase 10 approved, committed and pushed. Phase 11 postponed by the user.
+- 2026-11-05: Phase 11 built (version 1.2.0). `load_dataset()` reads `.parquet`/`.pq` (pyarrow, with an install hint when it's missing), `.json` (a list of records) and `.jsonl`/`.ndjson`; nested objects are flattened into `parent.child` columns (listed as `flattened_columns`), and `--json-path data.orders` reaches records under a key. JSON that isn't a table gets a specific error: a settings object (with the paths where lists of records were found, ready to pass to `--json-path`), a list of plain values, records mixed with other values, an empty list, a bad JSON Lines line (by line number). Lists and objects inside cells (JSON lists, Parquet lists and structs) are kept as JSON text so pandas can count them, reported as the new type problem `nested_values` with its own finding, cleaning advice and guide section, and left out of the category charts. For Parquet the report explains that typed columns can't hold numbers or dates as text, so few type problems is a property of the format, not proof the values are right. Additions beyond the plan: JSON Lines saved as `.json` is detected, Parquet DECIMAL columns are analysed as floats (and say so), `--encoding` applies to JSON, the pandas guide has Parquet/JSON reading examples. Checked: the sample data saved as Parquet, JSON and JSONL gives exactly the CSV's findings, and a typed Parquet version loses only the numbers/dates-as-text findings. `tests/test_formats.py` (30 tests); 232 passing tests, and 228 + 4 skipped on the minimum versions (pandas 2.1, NumPy 1.26, pyarrow 14, now in the CI job). Skill validator and `claude plugin validate` pass. The SKILL.md description changed (mentions Parquet and JSON); the trigger suite has not been re-run yet.
+- 2026-11-05: Phase 11 approved, committed and pushed. The trigger suite re-run was postponed to save session usage (small description change: Parquet and JSON added); run `python evals/run_triggers.py` before the next release.

@@ -74,6 +74,40 @@ Excel pitfalls: merged header cells become `Unnamed: n` columns; totals rows
 at the bottom get analysed as data; dates may arrive as numbers (days since
 1899-12-30): `pd.to_datetime(s, unit="D", origin="1899-12-30")`.
 
+**Parquet** is a columnar format: values are stored column by column, together
+with each column's type. A number stays a number and a date a date, so the
+"numbers stored as text" problems of CSV can't happen in a typed column, and
+reading only some columns is fast. It needs the `pyarrow` package.
+
+```python
+df.to_parquet(out_dir / "sales.parquet")  # keeps dtypes, unlike to_csv
+back = pd.read_parquet(out_dir / "sales.parquet", columns=["order_id", "revenue"])
+assert back["revenue"].dtype == df["revenue"].dtype
+```
+
+**JSON** comes in two table-shaped layouts: a list of records
+(`[{"id": 1, ...}, ...]`) and JSON Lines (`.jsonl`, one record per line). Nested
+objects become `parent.child` columns with `pd.json_normalize`; records
+further down a document are reached with `record_path` or by indexing the
+parsed data first.
+
+```python
+import json
+
+doc = json.loads('{"data": {"orders": [{"id": 1, "customer": {"city": "Rome"}, "tags": ["gift"]},'
+                 ' {"id": 2, "customer": {"city": "Oslo"}, "tags": []}]}}')
+orders = pd.json_normalize(doc["data"]["orders"])  # columns: id, tags, customer.city
+assert list(orders.columns) == ["id", "tags", "customer.city"]
+
+df.head(3).to_json(out_dir / "sales.jsonl", orient="records", lines=True)
+lines = pd.read_json(out_dir / "sales.jsonl", lines=True)
+```
+
+Lists inside records (`tags` above) stay lists: pandas can't count or
+deduplicate them (`TypeError: unhashable type: 'list'`). See
+[data-cleaning.md](data-cleaning.md#lists-and-nested-objects) for the options. `read_json` also guesses types and may turn text that
+looks like dates into dates; `dtype=False, convert_dates=False` stops that.
+
 ## 2. First inspection
 
 ```python
