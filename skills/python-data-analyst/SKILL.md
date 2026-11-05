@@ -1,11 +1,11 @@
 ---
 name: python-data-analyst
-description: Professional exploratory data analysis (EDA) of CSV, Excel, Parquet and JSON datasets with pandas, NumPy, Matplotlib and Seaborn. Use when the user asks to inspect, profile, explore, summarise or assess the quality of a dataset (.csv, .tsv, .xlsx, .parquet, .json, .jsonl), find missing values, duplicates, inconsistent types or outliers, compute descriptive statistics or correlations, create charts from tabular data, or write a data analysis report.
+description: Professional exploratory data analysis (EDA) of CSV, Excel, Parquet and JSON datasets with pandas, NumPy, Matplotlib and Seaborn. Use when the user asks to inspect, profile, explore, summarise or assess the quality of a dataset (.csv, .tsv, .xlsx, .parquet, .json, .jsonl), find missing values, duplicates, inconsistent types or outliers, compute descriptive statistics or correlations, create charts from tabular data, or write a data analysis report. Also use to clean a dataset (fill or drop missing values, remove duplicates, standardise inconsistent labels, convert numbers or dates stored as text, cap outliers) by applying approved fixes to a new copy with a change log.
 license: MIT
 compatibility: Needs Python 3.11+ with pandas, NumPy, Matplotlib and Seaborn (plus OpenPyXL for Excel, PyArrow for Parquet), and an agent that can run shell commands. Viewing images is optional.
 metadata:
   author: GrowingRui
-  version: "1.5.0"
+  version: "1.6.0"
   repository: https://github.com/GrowingRui/PythonDataAnalyst
 ---
 
