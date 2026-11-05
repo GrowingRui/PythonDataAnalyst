@@ -36,7 +36,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
-## Phase 1: Skill skeleton and SKILL.md 🟡 (built, waiting for your Claude Code check)
+## Phase 1: Skill skeleton and SKILL.md ✅
 
 **Goal:** Claude Code can discover the skill, even before any script exists.
 
@@ -53,7 +53,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
-## Phase 2: `inspect_data.py`, loading and overview ⬜
+## Phase 2: `inspect_data.py`, loading and overview 🟡 (built, waiting for your review)
 
 **Goal:** read any CSV or Excel file robustly and describe it.
 
@@ -158,3 +158,4 @@ We build this in small phases. Each phase ends with a review: you check the resu
 ## Change log
 
 - 2026-11-04: Plan created. Phase 0 done. Phase 1 built: SKILL.md (129 lines, 412-char description) and folder skeleton.
+- 2026-11-05: Phase 1 approved. Phase 2 built: `inspect_data.py` (load, classify, overview, stats, CLI) and 37 passing tests. Additions beyond the plan: an `empty` column kind for all-missing columns, `--encoding`/`--delimiter`/`--top` options, and a `skew_label` rule of thumb. `.xls` is rejected with instructions to re-save as `.xlsx`.
