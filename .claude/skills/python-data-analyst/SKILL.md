@@ -62,6 +62,12 @@ This reports shape, column types, descriptive statistics, missing values,
 duplicates, data-type problems and IQR outliers. Summarise it for the user
 in plain language. Don't paste raw JSON.
 
+If the file doesn't load cleanly, the error message says why. Useful options:
+`--sheet NAME` (Excel), `--encoding ENC` (e.g. `latin-1` when UTF-8 and
+cp1252 both fail), `--delimiter ";"` (when detection guesses wrong).
+Always mention the encoding and delimiter the script used if they weren't
+UTF-8 and a comma.
+
 ### Step 4: Run the full EDA
 ```bash
 python <skill-dir>/scripts/generate_eda.py <dataset>

@@ -15,3 +15,6 @@ eda_output/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Claude Code personal settings (per machine, never shared)
+.claude/settings.local.json
