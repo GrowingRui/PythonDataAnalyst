@@ -80,6 +80,10 @@ def test_shape(sample_run):
         ("duplicate_rows", None),
         ("duplicate_keys", "order_id"),
         ("incomplete_rows", None),
+        ("date_gaps", "order_date"),
+        ("date_spike", "order_date"),
+        ("implausible_dates", "order_date"),
+        ("partial_period", "order_date"),
     ],
 )
 def test_every_planted_problem_is_found(sample_run, rule, column):
@@ -97,6 +101,26 @@ def test_planted_counts(sample_run):
     assert missing["rating"]["disguised_values"] == {"'-'": 92}  # 90 planted + 2 among the duplicated rows
     assert missing["legacy_code"]["missing_pct"] == 100.0
     assert summary["analysis"]["excluded_id_columns"] == ["order_id"]
+
+
+def test_planted_time_problems(sample_run):
+    _, _, summary, _ = sample_run
+    time = summary["analysis"]["time"]
+    dates = time["date_columns"]["order_date"]
+    assert (dates["source"], dates["date_order"]) == ("text", "day-first")
+    assert dates["future"] == 1 and dates["future_examples"][0].startswith("2052-")
+    assert dates["placeholders"] == {"1900-01-01": 1}
+    t = time["trend"]
+    assert (t["period"], t["first"], t["last"]) == ("week", "2025-01-01", "2025-12-31")
+    assert t["rows_excluded_implausible"] == 2
+    assert [(g["first"], g["periods"]) for g in t["gaps"]] == [("week of 2025-08-04", 4)]
+    # Only the late load is a spike, not the busy November and December weeks.
+    assert [(sp["label"], sp["top_day"]) for sp in t["spikes"]] == [("week of 2025-09-15", "2025-09-15")]
+    assert [p["which"] for p in t["partial"]] == ["first", "last"]
+    assert t["value_column"] == "revenue"
+    # The outage's orders (and their duplicated copies) all carry the load date.
+    spike = t["spikes"][0]
+    assert (spike["rows"], spike["top_day_rows"], t["typical_rows"]) == (104, 93, 23)
 
 
 def test_no_false_alarms_on_clean_columns(sample_run):

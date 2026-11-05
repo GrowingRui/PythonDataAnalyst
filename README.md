@@ -49,9 +49,13 @@ support skills, such as OpenAI Codex, Gemini CLI, GitHub Copilot or Cursor.
   categories.
 - **Finds relationships:** Pearson and Spearman correlations, with a warning
   when they disagree.
+- **Follows dates over time:** rows per day, week, month, quarter or year
+  (chosen automatically), with gaps that are unlikely to be chance, spikes,
+  incomplete first and last periods, and future or placeholder dates
+  (`1900-01-01`). Dates stored as text are parsed in memory only.
 - **Draws charts:** histograms with box plots, log-scale histograms for skewed
-  data, top categories, a missing-values chart, a correlation heatmap and
-  scatter plots of the strongest pairs. They use one consistent,
+  data, top categories, a missing-values chart, a time trend, a correlation
+  heatmap and scatter plots of the strongest pairs. They use one consistent,
   colourblind-checked palette.
 - **Writes a report:** `report.md` with ranked findings, cleaning options and
   what each one costs, suggested next steps and limitations. `summary.json`
@@ -182,6 +186,8 @@ python skills/python-data-analyst/scripts/generate_eda.py data/sales.csv        
 | `--max-categories N` | EDA | Top-N categories per chart; the rest become "Other" |
 | `--max-scatter-points N` | EDA | Random sample size for scatter plots on large data |
 | `--max-charts N` | EDA | Cap on the number of charts (default 40) |
+| `--date-column COL` | EDA | Date column for the time trend (default: the one with the most dates) |
+| `--period P` | EDA | `day`, `week`, `month`, `quarter` or `year` for the time trend (default: about 12–120 points) |
 
 ## What you get
 
@@ -191,8 +197,8 @@ eda_output/sales_20261105-092532/
 ├── summary.json    # every computed fact, plus the ranked findings
 └── charts/
     ├── 01_missing_values.png
-    ├── 02_correlation_heatmap.png
-    ├── 03_scatter_unit_price__revenue.png
+    ├── 02_time_order_date_by_week.png
+    ├── 03_correlation_heatmap.png
     └── ...
 ```
 
@@ -240,11 +246,12 @@ skills/python-data-analyst/     # the whole skill: this folder is what gets inst
 ├── scripts/
 │   ├── inspect_data.py         # loading, column types, statistics, quality checks
 │   ├── generate_eda.py         # correlations, categories, charts; writes the output folder
+│   ├── time_trends.py          # rows per period, gaps, spikes, implausible dates
 │   └── report.py               # rule-based findings and report.md
 └── references/                 # loaded only when needed
     ├── pandas-guide.md         # reading tricky files, groupby, memory, pandas pitfalls
     ├── data-cleaning.md        # options per problem and what each one costs
-    └── visualization-guide.md  # which chart answers which question, misleading charts
+    └── visualization-guide.md  # which chart answers which question, trends, misleading charts
 ```
 
 The design follows a few rules:
@@ -274,6 +281,7 @@ The design follows a few rules:
 | Placeholder detection | A fixed list (`-`, `?`, `n/a`, `unknown`, ...) and numeric codes like `999` that are outliers | Codes inside the normal range (`0` meaning "no answer") |
 | Parquet's stored types | Typed columns can't hold numbers or dates as text, so fewer type problems are found | That the values are right: the report says why type problems are absent |
 | JSON flattening | Nested objects become `parent.child` columns; lists are counted and reported | The items inside lists: they aren't analysed or charted |
+| Time trend (rows per period) | When rows are missing, bunched up or misdated, for one date column | Forecasts; seasonality from less than two years of data. Gaps and spikes assume rows arrive at a steady random rate |
 
 Correlations are computed between numeric columns only, and none of them
 shows cause and effect. Severity labels on findings mean *how much this could

@@ -5,7 +5,7 @@ license: MIT
 compatibility: Needs Python 3.11+ with pandas, NumPy, Matplotlib and Seaborn (plus OpenPyXL for Excel, PyArrow for Parquet), and an agent that can run shell commands. Viewing images is optional.
 metadata:
   author: GrowingRui
-  version: "1.2.0"
+  version: "1.3.0"
   repository: https://github.com/GrowingRui/PythonDataAnalyst
 ---
 
@@ -107,11 +107,23 @@ This creates `eda_output/<dataset>_<timestamp>/` containing `report.md`,
 | `--max-scatter-points N` | Sample size for scatter plots on large data |
 | `--max-charts N` | Cap on the number of charts (default 40); skipped charts are listed in `summary.json` |
 | `--key COLS` | Key columns for the duplicate-key check, e.g. `order_id` |
+| `--date-column COL` | Date column for the time trend (default: the one with the most dates) |
+| `--period P` | `day`, `week`, `month`, `quarter` or `year` for the time trend (default: chosen automatically) |
 
 Columns that look like row IDs (`order_id`, `customerID`, a 1, 2, 3, ...
 counter, or any numeric column passed with `--key`) are left out of charts
 and correlations; `summary.json` lists them under
 `analysis.excluded_id_columns`. Mention this if the user expected them.
+
+When the data has dates (real date columns, or dates stored as text, which
+are parsed in memory only), the EDA adds a time trend: rows per period for
+one date column, with the median of an amount-like column below it, and
+findings for gaps (`date_gaps`), spikes (`date_spike`), incomplete first or
+last periods (`partial_period`) and future or placeholder dates
+(`implausible_dates`, left out of the trend). Details are in `summary.json`
+under `analysis.time`. If the wrong date column was used (e.g. a load date
+instead of the order date), run again with `--date-column`. A trend
+describes the past: don't present it as a forecast.
 
 `report.md` is complete without you: overview, quality, statistics,
 rule-based findings, a short text per chart, cleaning options with their

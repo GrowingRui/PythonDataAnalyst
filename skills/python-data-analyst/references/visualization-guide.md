@@ -11,8 +11,9 @@ where they differ.
 2. [Readability rules](#2-readability-rules)
 3. [Colors](#3-colors)
 4. [Code: charts in the skill's style](#4-code-charts-in-the-skills-style)
-5. [Misleading charts](#5-misleading-charts)
-6. [Checklist before showing a chart](#6-checklist-before-showing-a-chart)
+5. [Trends and seasonality](#5-trends-and-seasonality)
+6. [Misleading charts](#6-misleading-charts)
+7. [Checklist before showing a chart](#7-checklist-before-showing-a-chart)
 
 ---
 
@@ -162,7 +163,9 @@ with plt.rc_context(STYLE):
     plt.close(fig)
 ```
 
-Check the first and last period: partial months look like sudden drops.
+Check the first and last period: partial months look like sudden drops. For
+reading a trend (seasonality, calendar effects, smoothing), see
+[section 5](#5-trends-and-seasonality).
 
 ### Which group is largest: a sorted bar chart
 
@@ -240,7 +243,63 @@ with plt.rc_context(STYLE):
 Always `plt.close(fig)` after saving; scripts that draw many charts otherwise
 keep every figure in memory.
 
-## 5. Misleading charts
+## 5. Trends and seasonality
+
+`generate_eda.py` draws rows per period for the main date column (the one
+with the most dates, or `--date-column`). It picks the period so the chart has
+roughly 12–120 points with enough rows in each (`--period` overrides it),
+dashes incomplete first and last periods, shades empty runs that are unlikely
+to be chance in red, and rings spikes. Below it, the median of one numeric
+column per period (an amount-like name such as `revenue`, else the fullest
+numeric column).
+
+A line over time mixes three things. Name which one you're talking about:
+
+| Part | What it is | How to see it |
+|---|---|---|
+| **Trend** | The slow direction over many periods | A rolling median over several periods |
+| **Seasonality** | A pattern that repeats every year (or week, or day) | The same period in different years |
+| **Noise** | Random ups and downs | Small counts per period make it larger |
+
+**Month-on-month comparisons mislead when there's seasonality.** December
+beats November in retail every year; that isn't growth. Compare each period
+with the same period a year earlier. That needs at least two full years, and
+one busy November is not yet a pattern.
+
+**Calendar effects.** February has 28 days and March 31, about 10% more. Months
+have different numbers of weekends, and holidays move (Easter). Compare rows
+**per day** when periods differ in length or are incomplete.
+
+**Smoothing** (a rolling median) shows the trend through the noise, but it
+lags behind real changes and has fewer values at the ends. Say which window
+you used.
+
+```python
+monthly = df.groupby(df["order_date"].dt.to_period("M"))["revenue"].agg(["count", "median"])
+
+# Calendar effect: compare rows per day, not per month.
+monthly["per_day"] = monthly["count"] / monthly.index.days_in_month
+
+# Trend through the noise: a centred 3-month rolling median (the ends use fewer months).
+monthly["smoothed"] = monthly["per_day"].rolling(3, center=True, min_periods=2).median()
+
+# Seasonality: the same month a year earlier. Missing until there are 13 months.
+monthly["vs_last_year"] = monthly["count"].pct_change(12)
+```
+
+**A trend is not a forecast.** Extending a line assumes that whatever drove
+the past continues: the same customers, prices, seasons and data collection.
+A trend line has no uncertainty attached, and a seasonal peak extended
+forward predicts nonsense. If the user needs a forecast, say so: it needs a
+model that handles seasonality, gives a range rather than a single number,
+and is tested on periods it hasn't seen. That's beyond an EDA.
+
+**Before reading anything into a trend**, check the time findings in the
+report: a gap (`date_gaps`) or a spike (`date_spike`) is often a data problem
+(an outage, a late load) rather than a real change, and
+`references/data-cleaning.md` section 8 lists the options.
+
+## 6. Misleading charts
 
 Each of these can make a true number tell a false story.
 
@@ -260,7 +319,7 @@ Each of these can make a true number tell a false story.
 | Log axis not labeled | Readers assume equal steps | "(log scale)" in the axis label and subtitle |
 | Unsorted categories | The reader has to search for the largest | Sort by value or natural order |
 
-## 6. Checklist before showing a chart
+## 7. Checklist before showing a chart
 
 1. Can you state its message in one sentence? Put that sentence in the report.
 2. Does the title name the subject and the subtitle explain how to read it?

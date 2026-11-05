@@ -5,6 +5,7 @@ Usage:
     python generate_eda.py data.xlsx --sheet 2025 --output results/
     python generate_eda.py big.csv --max-categories 8 --max-scatter-points 3000
     python generate_eda.py export.json --json-path data.orders
+    python generate_eda.py orders.csv --date-column shipped_at --period month
 
 Writes a new folder (default ./eda_output/<dataset>_<timestamp>/) containing
 report.md, summary.json and charts/*.png. The input file is only ever read; its
@@ -26,6 +27,7 @@ import matplotlib
 
 matplotlib.use("Agg")  # headless: no window, works on servers and in CI
 
+import matplotlib.dates as mdates  # noqa: E402
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -44,6 +46,7 @@ from inspect_data import (  # noqa: E402
     to_jsonable,
 )
 from report import build_findings, write_report  # noqa: E402
+from time_trends import PERIOD_NAMES, time_summary  # noqa: E402
 
 # --------------------------------------------------------------------------
 # Defaults and limits
@@ -75,6 +78,7 @@ COLOR_INK_2 = "#52514e"
 COLOR_MUTED = "#898781"
 COLOR_GRID = "#e1e0d9"
 COLOR_AXIS = "#c3c2b7"
+COLOR_PROBLEM = "#e34948"  # red, palette slot 8: empty periods in the time chart
 DIVERGING = LinearSegmentedColormap.from_list(
     "blue_gray_red", ["#184f95", "#2a78d6", "#86b6ef", "#f0efec", "#f0a3a2", "#e34948", "#a32b2a"]
 )
@@ -503,6 +507,96 @@ def chart_scatter(df: pd.DataFrame, pair: dict[str, Any], max_points: int, path:
     return {"type": "scatter", "columns": [a, b], "points_shown": int(len(data)), "sampled": sampled}
 
 
+def chart_time(time: dict[str, Any], path: Path) -> dict[str, Any] | None:
+    """Rows per period as a line; below it, the median of one numeric column per period.
+
+    Partial first/last periods are drawn dashed with hollow markers (a
+    half-covered week looks like a drop), empty runs flagged as gaps get a red
+    band, spikes a ring. Two panels with one shared x-axis, not two y-axes.
+    """
+    t = time.get("trend")
+    if not t:
+        return None
+    col, period, periods = time["column"], t["period"], t["periods"]
+    x = pd.to_datetime([p["start"] for p in periods])
+    counts = np.array([p["rows"] for p in periods], dtype=float)
+    partial = {i for i, p in enumerate(periods) if p.get("partial")}
+    value = t.get("value_column")
+    if value:
+        fig, (ax, ax_v) = plt.subplots(2, 1, figsize=(8.5, 5.8), sharex=True,
+                                       gridspec_kw={"height_ratios": [3, 2], "hspace": 0.12})
+    else:
+        fig, ax = _new_fig(8.5, 3.8)
+        ax_v = None
+
+    handles = [_time_line(ax, x, counts, partial, f"rows per {period}")]
+    for g in t["gaps"]:
+        i, j = g["start_index"], g["end_index"]
+        left = x[i] - (x[i] - x[i - 1]) / 2
+        right = x[j] + (x[j + 1] - x[j]) / 2
+        for a in (ax, ax_v) if ax_v is not None else (ax,):
+            a.axvspan(left, right, color=COLOR_PROBLEM, alpha=0.12, linewidth=0)
+    if t["gaps"]:
+        handles.append(plt.Rectangle((0, 0), 1, 1, color=COLOR_PROBLEM, alpha=0.25,
+                                     label="no rows: possible missing data"))
+    spikes = [s["index"] for s in t["spikes"]]
+    if spikes:
+        handles.append(ax.scatter(x[spikes], counts[spikes], s=110, facecolors="none", edgecolors=COLOR_INK,
+                                  linewidths=1.3, zorder=4, label=f"spike: ≥ 3 × the typical {period}"))
+        for i in spikes:
+            ax.annotate(f"{int(counts[i]):,}", (x[i], counts[i]), xytext=(8, 0), textcoords="offset points",
+                        va="center", fontsize=9, color=COLOR_INK_2)
+    if partial:
+        handles.append(plt.Line2D([], [], color=COLOR_SERIES, linestyle=(0, (4, 3)), marker="o",
+                                  markerfacecolor=COLOR_SURFACE, markersize=5, label=f"incomplete {period}"))
+    ax.set_ylim(bottom=0, top=max(counts.max() * 1.15, 1))  # a count: keep zero in view
+    ax.yaxis.set_major_locator(MaxNLocator(integer=True, nbins=5))
+    ax.yaxis.set_major_formatter(_number_formatter(counts.max()))
+    ax.set_ylabel("rows")
+    ax.grid(axis="x", visible=False)
+    ax.legend(handles=handles, loc="upper left", fontsize=8.5, labelcolor=COLOR_INK_2, ncol=2)
+
+    if ax_v is not None:
+        med = np.array([np.nan if p.get("value_median") is None else p["value_median"] for p in periods])
+        _time_line(ax_v, x, med, partial, f"median {value}")
+        finite = med[np.isfinite(med)]
+        if finite.size:
+            ax_v.yaxis.set_major_formatter(_number_formatter(np.abs(finite).max()))
+        ax_v.yaxis.set_major_locator(MaxNLocator(nbins=4))
+        ax_v.set_ylabel(f"median {_short(value, 20)}")
+        ax_v.grid(axis="x", visible=False)
+    bottom = ax_v if ax_v is not None else ax
+    locator = mdates.AutoDateLocator(minticks=4, maxticks=10)
+    bottom.xaxis.set_major_locator(locator)
+    bottom.xaxis.set_major_formatter(mdates.ConciseDateFormatter(locator))
+
+    sub = f"{t['rows_used']:,} rows, {t['first'][:10]} to {t['last'][:10]}"
+    if t["rows_excluded_implausible"]:
+        sub += f"  ·  {t['rows_excluded_implausible']:,} implausible date(s) left out"
+    if value:
+        sub += f"  ·  below: median {value} per {period}"
+    _titles(ax, f"Rows per {period} by {col}", sub)
+    _save(fig, path)
+    return {"type": "time_trend", "column": col, "period": period, "value_column": value,
+            "points": len(periods)}
+
+
+def _time_line(ax, x, y: np.ndarray, partial: set[int], label: str):
+    """Solid line through full periods, dashed segments to partial first/last points."""
+    n = len(y)
+    lo = 1 if 0 in partial and n > 2 else 0
+    hi = n - 2 if (n - 1) in partial and n > 2 else n - 1
+    line, = ax.plot(x[lo:hi + 1], y[lo:hi + 1], color=COLOR_SERIES, linewidth=1.8, marker="o",
+                    markersize=3 if n > 40 else 4, label=label, zorder=3)
+    if n > 2:
+        for k, segment in ((0, slice(0, 2)), (n - 1, slice(n - 2, n))):
+            if k in partial:
+                ax.plot(x[segment], y[segment], color=COLOR_SERIES, linewidth=1.5, linestyle=(0, (4, 3)), zorder=3)
+                ax.plot(x[k], y[k], marker="o", markersize=5, color=COLOR_SERIES,
+                        markerfacecolor=COLOR_SURFACE, zorder=4)
+    return line
+
+
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
@@ -531,10 +625,14 @@ def run_eda(
     max_categories: int = DEFAULT_MAX_CATEGORIES,
     max_scatter_points: int = DEFAULT_MAX_SCATTER_POINTS,
     max_charts: int = DEFAULT_MAX_CHARTS,
+    date_column: str | None = None,
+    period: str | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Analyse ``df``, write charts, summary.json and report.md into ``out_dir``, return the summary."""
-    out_dir = prepare_output_dir(Path(out_dir))
-    charts_dir = out_dir / "charts"
+    """Analyse ``df``, write charts, summary.json and report.md into ``out_dir``, return the summary.
+
+    ``now`` is the date that counts as "today" for the future-date check (default: now).
+    """
     source_file = _source_file(df)
     sha_before = file_sha256(source_file) if source_file else None
 
@@ -544,11 +642,19 @@ def run_eda(
     # Columns given with --key are identifiers by definition, even when they
     # repeat (which is exactly what the key check is there to catch).
     ids += [k for k in key_columns or [] if kinds.get(k) == "numeric" and k not in ids]
+    # Before the output folder exists: a wrong --date-column or --period leaves nothing behind.
+    time = time_summary(df, kinds, summary["quality"]["type_issues"], date_column=date_column,
+                        period=period, exclude_values=ids, now=now)
+    out_dir = prepare_output_dir(Path(out_dir))
+    charts_dir = out_dir / "charts"
     corr = correlations(df, correlation_columns(df, kinds, ids))
     cats = categorical_summary(df, kinds, max_categories)
 
     # Planned charts in priority order; the cap cuts from the end.
-    plan: list[tuple[str, Any]] = [("missing", None), ("heatmap", None)]
+    plan: list[tuple[str, Any]] = [("missing", None)]
+    if time and time["trend"]:
+        plan.append(("time", None))
+    plan.append(("heatmap", None))
     plan += [("scatter", p) for p in corr["pairs"][:TOP_SCATTER_PAIRS]]
     for c in df.columns:
         if kinds[str(c)] == "numeric" and str(c) not in ids and df[c].notna().any():
@@ -575,6 +681,9 @@ def run_eda(
             elif kind == "heatmap":
                 path = charts_dir / f"{prefix}_correlation_heatmap.png"
                 info = chart_heatmap(corr, path)
+            elif kind == "time":
+                path = charts_dir / f"{prefix}_time_{_slug(time['column'])}_by_{time['trend']['period']}.png"
+                info = chart_time(time, path)
             elif kind == "scatter":
                 path = charts_dir / f"{prefix}_scatter_{_slug(item['a'])}__{_slug(item['b'])}.png"
                 info = chart_scatter(df, item, max_scatter_points, path)
@@ -596,6 +705,7 @@ def run_eda(
         "excluded_id_columns": ids,
         "correlations": corr,
         "categorical": cats,
+        "time": time,
     }
     summary["charts"] = charts
     summary["charts_skipped"] = skipped
@@ -604,6 +714,8 @@ def run_eda(
         "max_scatter_points": max_scatter_points,
         "max_charts": max_charts,
         "key_columns": key_columns,
+        "date_column": date_column,
+        "period": period,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     summary = to_jsonable(summary)
@@ -675,6 +787,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help=f"random sample size for scatter plots (default {DEFAULT_MAX_SCATTER_POINTS})")
     p.add_argument("--max-charts", type=int, default=DEFAULT_MAX_CHARTS,
                    help=f"maximum number of charts (default {DEFAULT_MAX_CHARTS})")
+    p.add_argument("--date-column", help="date column for the time trend (default: the one with the most dates)")
+    p.add_argument("--period", choices=PERIOD_NAMES,
+                   help="period for the time trend (default: chosen so the chart has about 12-120 points)")
     return p
 
 
@@ -699,7 +814,8 @@ def main(argv: list[str] | None = None) -> int:
         out_dir = Path(args.output) if args.output else default_output_dir(dataset)
         keys = [k.strip() for k in args.key.split(",")] if args.key else None
         summary = run_eda(df, out_dir, key_columns=keys, max_categories=args.max_categories,
-                          max_scatter_points=args.max_scatter_points, max_charts=args.max_charts)
+                          max_scatter_points=args.max_scatter_points, max_charts=args.max_charts,
+                          date_column=args.date_column, period=args.period)
     except DatasetError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -711,6 +827,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  {c['file']}")
     if summary["charts_skipped"]:
         print(f"  {len(summary['charts_skipped'])} chart(s) skipped by --max-charts {args.max_charts}")
+    time = summary["analysis"]["time"]
+    if time and time["trend"]:
+        t = time["trend"]
+        print(f"Time trend: {time['column']} by {t['period']}, {t['first'][:10]} to {t['last'][:10]} "
+              f"({len(t['periods'])} points)")
+    elif time:
+        print(f"Time trend: none for {time['column']} ({time['note']})")
     pairs = summary["analysis"]["correlations"]["pairs"][:3]
     if pairs:
         print("Strongest correlations:")

@@ -9,7 +9,17 @@ byte for byte. It's synthetic: no real customers or orders.
 
 Planted problems (the answer key; the EDA should find every one of them)
 -------------------------------------------------------------------------
-- order_date        dates stored as text, day first (31/12/2025)
+- order_date        dates stored as text, day first (31/12/2025), and over time:
+                    - a gap: no orders from 4 to 31 August (four full weeks,
+                      e.g. an outage); those orders were loaded later and
+                    - a spike: they all carry the load date, 15 September,
+                      so that week has about five times the usual orders
+                    - one future date (2052, a typo for 2025) and one
+                      placeholder date (01/01/1900)
+                    - partial first and last weeks: 1 January and
+                      31 December 2025 are Wednesdays
+                    - busier November and December: real seasonality, not a
+                      problem (the spike rule must not flag it)
 - region            inconsistent labels ("north") and trailing spaces ("South ")
 - discount_pct      ~12% missing, mostly for Store orders (missing at random, MAR)
 - delivery_days     missing for every Store order (not applicable, ~30%), and the
@@ -49,6 +59,8 @@ CATEGORIES = {  # median unit price
     "Books": 12.0,
     "Sports": 45.0,
 }
+GAP_START, GAP_END = "2025-08-04", "2025-08-31"  # Monday to Sunday: four full weeks
+LOAD_DATE = "2025-09-15"
 REGIONS = {"North": 0.30, "South": 0.25, "East": 0.20, "West": 0.25}
 CHANNELS = {"Online": 0.55, "Store": 0.30, "Phone": 0.15}
 
@@ -125,6 +137,7 @@ def make_sales(seed: int = SEED, n: int = N_ORDERS) -> pd.DataFrame:
     df.loc[rng.choice(online, 5, replace=False), "shipping_cost"] = "free"
 
     df["revenue"] = np.round(df["quantity"] * df["unit_price"] * (1 - df["discount_pct"].fillna(0) / 100), 2)
+    df["order_date"] = _plant_date_problems(dates, seed)
 
     # Exact duplicates (e.g. an export that ran twice) and repeated keys with
     # conflicting values (e.g. an order edited after the first export).
@@ -136,6 +149,24 @@ def make_sales(seed: int = SEED, n: int = N_ORDERS) -> pd.DataFrame:
     )
     df = pd.concat([df, exact, edited])
     return df.sort_values("order_id", kind="stable").reset_index(drop=True)
+
+
+def _plant_date_problems(dates: pd.DatetimeIndex, seed: int) -> np.ndarray:
+    """Gap, spike, a future date and a placeholder date, as day-first text.
+
+    Uses its own random generator, so every other column stays exactly as it
+    was before these problems were added.
+    """
+    rng = np.random.default_rng(seed + 1)
+    dates = pd.Series(dates)
+    outage = dates.between(GAP_START, GAP_END)
+    dates[outage] = pd.Timestamp(LOAD_DATE)  # loaded late, stamped with the load date
+    text = dates.dt.strftime("%d/%m/%Y").to_numpy(dtype=object)
+    normal = np.flatnonzero(~outage.to_numpy())
+    future, placeholder = rng.choice(normal, 2, replace=False)
+    text[future] = dates[future].strftime("%d/%m/") + "2052"  # typo: 2052 for 2025
+    text[placeholder] = "01/01/1900"
+    return text
 
 
 def write_csv(df: pd.DataFrame, path: Path) -> Path:

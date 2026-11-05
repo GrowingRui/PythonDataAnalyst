@@ -13,8 +13,9 @@ rows or values it touches.
 5. [Type problems](#5-type-problems)
 6. [Outliers](#6-outliers)
 7. [Skewed, constant and nearly constant columns](#7-skewed-constant-and-nearly-constant-columns)
-8. [Proposing changes to the user](#8-proposing-changes-to-the-user)
-9. [Applying approved changes](#9-applying-approved-changes)
+8. [Dates over time](#8-dates-over-time)
+9. [Proposing changes to the user](#9-proposing-changes-to-the-user)
+10. [Applying approved changes](#10-applying-approved-changes)
 
 Each section names the `rule` values it covers in `summary.json` → `findings`,
 so you can go from a finding straight to its options. The examples use the
@@ -353,7 +354,55 @@ are usually one column derived from another (a total and its parts, the same
 measure in two units). Not a data error; keep both in the file, but use only
 one in a model.
 
-## 8. Proposing changes to the user
+## 8. Dates over time
+
+Finding rules: `implausible_dates`, `date_gaps`, `date_spike`, `partial_period`.
+
+`generate_eda.py` groups the main date column into periods (rows per week,
+month, ...) and flags what looks wrong over time. None of these is fixed by
+editing values without the data owner: a date is evidence of *when* something
+happened, and a guessed date is worse than a missing one.
+
+```python
+dates = pd.to_datetime(clean["order_date"], format="%d/%m/%Y", errors="coerce")
+
+# Implausible dates: count and show them before deciding anything.
+today = pd.Timestamp.today().normalize()
+placeholder = dates.isin(pd.to_datetime(["1899-12-30", "1900-01-01", "1970-01-01"]))
+future = dates > today
+print(f"{int(future.sum())} future and {int(placeholder.sum())} placeholder dates")
+dates = dates.mask(placeholder)  # placeholders mean "unknown" (only after the user agrees)
+
+# Gaps and spikes: rows per week, with the empty weeks included.
+weekly = dates.dt.to_period("W-SUN").value_counts().sort_index()
+weekly = weekly.reindex(pd.period_range(weekly.index.min(), weekly.index.max(), freq="W-SUN"), fill_value=0)
+empty_weeks = weekly[weekly == 0]
+# Inside the busiest week: one date holding most rows points to a load date, not real activity.
+busiest = weekly.idxmax()
+print(dates[dates.dt.to_period("W-SUN") == busiest].dt.date.value_counts().head(3))
+
+# Partial periods: rows per covered day stay comparable when a month is cut short.
+first_day, last_day = dates.min(), dates.max()
+monthly = dates.dt.to_period("M").value_counts().sort_index()
+covered = pd.Series({p: (min(p.end_time, last_day) - max(p.start_time, first_day)).days + 1
+                     for p in monthly.index})
+per_day = monthly / covered
+```
+
+| Finding | Options | Cost |
+|---|---|---|
+| `implausible_dates`: future dates | Check the source; correct an obvious typo (2052 for 2025) only when the owner confirms it, otherwise make it missing | A future date can be right: due dates and planned deliveries are in the future by design |
+| `implausible_dates`: placeholders (`1900-01-01`, `1970-01-01`) | Make them missing (`mask`, above) | More missing dates, but no fake history: a 1900 order date stretches every range and age |
+| `date_gaps` | Ask whether the period is missing from the export or really had no activity. Compare periods outside the gap only, or mark it in every chart | **Never** fill a gap with zeros or interpolated values: that invents data. Ignoring it understates totals and averages |
+| `date_spike` | Look at the rows in the spike period: many rows on one date, repeated keys or exact duplicates point to a double or late load. Deduplicate, or use a different date column (`--date-column`) | Removing a real peak (a sale, a launch) deletes the most important event in the data |
+| `partial_period` | Leave the first or last period out of comparisons, or compare rows per covered day (`per_day`, above) | Dropping the rows themselves loses real data from totals; they're only a problem when compared as if complete |
+
+A gap followed by a spike, as in the sample data, often has one cause: rows
+that arrived late and were stamped with the day they were loaded. Then the
+right fix is a better date (the original order date from the source), not
+deleting the spike.
+
+## 9. Proposing changes to the user
 
 Present each proposed step in this shape, and wait for an answer:
 
@@ -371,7 +420,7 @@ Present each proposed step in this shape, and wait for an answer:
 Group small, safe steps (trimming spaces) into one proposal; give every step
 that removes rows or changes values its own.
 
-## 9. Applying approved changes
+## 10. Applying approved changes
 
 Apply only the approved steps, in the order of the ground rules, and keep a
 log with counts:

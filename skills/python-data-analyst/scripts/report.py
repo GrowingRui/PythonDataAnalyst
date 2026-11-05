@@ -144,6 +144,33 @@ CLEANING_ADVICE: dict[str, tuple[str, str, str]] = {
         "Removing real values biases means and totals and hides the cases that may matter most. "
         "Capping keeps the rows but changes the values.",
     ),
+    "implausible_dates": (
+        "Implausible dates",
+        "Check them against the source. Placeholders (`1900-01-01`, `1970-01-01`) become missing values "
+        "(`df[col].mask(df[col].isin([...]))`); obvious typos (2052 for 2025) are corrected only with the "
+        "data owner's confirmation.",
+        "Left in, one wrong date stretches every time chart and date range. Guessing the \"right\" year "
+        "invents data; a missing date is more honest than a guessed one.",
+    ),
+    "date_gaps": (
+        "Periods without rows",
+        "Ask the data owner whether the period is missing from the export (outage, failed load) or really "
+        "had no activity. Compare periods only outside the gap, or label the gap in every chart.",
+        "Filling the gap with zeros or interpolated values invents data. Ignoring it understates totals "
+        "and averages over the whole range.",
+    ),
+    "date_spike": (
+        "Spikes in rows per period",
+        "Check the spike period for duplicate or late-loaded rows: rows sharing a key, or many rows stamped "
+        "with one date. If it's a loading artefact, deduplicate or use a better date column if there is one.",
+        "Removing a real peak (a sale, a campaign) hides the most important event in the data.",
+    ),
+    "partial_period": (
+        "Incomplete first or last period",
+        "Leave partial periods out when comparing periods, or compare rows per day instead of per period.",
+        "Dropping their rows loses real data from totals; comparing them as if complete makes them look "
+        "like drops.",
+    ),
 }
 # Several findings share the same advice.
 ADVICE_ALIAS = {"missing_minor": "missing_values", "incomplete_rows": "missing_values"}
@@ -337,6 +364,8 @@ def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
             f"{len(pairs) - CORR_FINDINGS_MAX:,} more strongly correlated pairs are not listed here",
             "All pairs, ranked by strength, are in `summary.json` under `analysis.correlations.pairs`.")
 
+    _time_findings(analysis.get("time"), add)
+
     if ids:
         add("id_columns", "low", sorted(ids),
             f"{_plural(len(ids), 'column was treated as a row ID', 'columns were treated as row IDs')}: "
@@ -349,6 +378,74 @@ def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
     for f in out:
         del f["_metric"]
     return out
+
+
+def _time_findings(time: dict[str, Any] | None, add) -> None:
+    """Implausible dates (every date column); gaps, spikes and partial periods (the trend column)."""
+    if not time:
+        return
+    for name, c in time["date_columns"].items():
+        parts, n = [], 0
+        if c["future_excluded"]:
+            n += c["future"]
+            parts.append(f"{_plural(c['future'], 'date lies', 'dates lie')} in the future (after "
+                         f"{c['today']}): {', '.join(code(d) for d in c['future_examples'])}")
+        if c["placeholders"]:
+            count = sum(c["placeholders"].values())
+            n += count
+            listed = ", ".join(f"{code(d)} ×{k}" for d, k in c["placeholders"].items())
+            parts.append(f"{_plural(count, 'date is a common placeholder', 'dates are common placeholders')} "
+                         f"(Excel's day zero, the Unix epoch): {listed}")
+        if not n:
+            continue
+        detail = _sentence("; ".join(parts))
+        if name == time["column"] and time.get("trend"):
+            detail += " They were left out of the time trend, so they don't stretch its date range."
+        if c["future_excluded"]:
+            detail += (" A future date is fine if the column holds planned dates (delivery, due date); in a "
+                       "column of past events it's usually a typo.")
+        if c["placeholders"]:
+            detail += " Placeholders usually mean the date was unknown when the row was entered."
+        add("implausible_dates", "medium", [name],
+            f"{code(name)} has {_plural(n, 'implausible date', 'implausible dates')}", detail, n)
+
+    t = time.get("trend")
+    if not t:
+        return
+    col, period = time["column"], t["period"]
+    typical = _num(t["typical_rows"])
+    for g in t["gaps"]:
+        span = g["first"] if g["periods"] == 1 else f"{g['first']} to {g['last']}"
+        add("date_gaps", "medium", [col],
+            f"{code(col)} has no rows for {_plural(g['periods'], period, period + 's')} in a row ({span})",
+            f"A typical {period} has {typical} rows, so an empty stretch this long is very unlikely to be "
+            f"chance ({g['chance']} if rows arrived at random). Possibly missing data (an outage, a failed "
+            "export); check with the data owner before comparing these periods with others.",
+            50 + g["periods"])
+    for sp in t["spikes"]:
+        detail = f"A typical {period} has {typical} rows."
+        if period != "day":
+            detail += f" {sp['top_day_rows']:,} of the {sp['rows']:,} rows fall on {code(sp['top_day'])}."
+        if sp["exact_duplicates"]:
+            detail += (" " + _plural(sp["exact_duplicates"], f"row in this {period} is an exact duplicate",
+                                     f"rows in this {period} are exact duplicates") + " of an earlier row.")
+        detail += (" A spike can be a real event (a sale, a campaign) or a data artefact: a duplicate import, "
+                   "or late rows stamped with the date they were loaded.")
+        if t["gaps"]:
+            detail += " Compare it with the gap: rows that arrived late would explain both."
+        add("date_spike", "medium", [col],
+            f"{code(col)}: the {sp['label']} has {sp['rows']:,} rows, {_num(sp['ratio'], 2)}× a typical {period}",
+            detail, sp["ratio"])
+    if t["partial"]:
+        which = " and ".join(p["which"] for p in t["partial"])
+        many = len(t["partial"]) > 1
+        covers = "; ".join(f"the {p['which']} ({p['label']}) covers {p['days_covered']} of "
+                           f"{p['days_in_period']} days and has {p['rows']:,} rows" for p in t["partial"])
+        add("partial_period", "low", [col],
+            f"The {which} {period}{'s' if many else ''} of {code(col)} {'are' if many else 'is'} incomplete",
+            f"The data runs from {t['first'][:10]} to {t['last'][:10]}: {covers}. Their counts look like "
+            f"drops but cover only part of the {period}; the chart draws them dashed. Leave them out when "
+            "comparing periods.", 0)
 
 
 def _type_issue_title(i: dict[str, Any]) -> str:
@@ -455,12 +552,24 @@ def analysis_suggestions(summary: dict[str, Any], findings: list[dict[str, Any]]
     ids = set(summary.get("analysis", {}).get("excluded_id_columns", []))
     rules = {f["rule"] for f in findings}
     numeric = [k for k, v in st.items() if v.get("kind") == "numeric" and k not in ids and v.get("count")]
-    categorical = [k for k, v in st.items() if v.get("kind") in ("categorical", "boolean") and v.get("count")]
     dates = [k for k, v in st.items() if v.get("kind") == "datetime"]
     dates += [i["column"] for i in summary["quality"]["type_issues"] if i["issue"] == "dates_as_text"]
+    # Dates, numbers and lists stored as text look categorical but aren't groups.
+    not_groups = set(dates) | {i["column"] for i in summary["quality"]["type_issues"]
+                               if i["issue"] in ("numbers_as_text", "nested_values")}
+    categorical = [k for k, v in st.items() if v.get("kind") in ("categorical", "boolean") and v.get("count")
+                   and k not in not_groups]
 
     out = ["Agree on the question this data should answer. It decides which of the findings above matter most."]
-    if dates and numeric:
+    trend = (summary.get("analysis", {}).get("time") or {}).get("trend")
+    if trend:
+        if trend["span_years"] >= 2:
+            out.append(f"To see seasonality, compare each {trend['period']} with the same {trend['period']} a "
+                       "year earlier, not with the one just before it.")
+        else:
+            out.append("With less than two years of data, a seasonal pattern can't be told apart from a "
+                       "trend: one busy November is not yet a pattern.")
+    elif dates and numeric:
         out.append(f"Plot how {_codes(numeric[:3])} change over time using {code(dates[0])}"
                    + (" (after parsing the dates)." if dates[0] not in st or st[dates[0]].get("kind") != "datetime"
                       else "."))
@@ -532,9 +641,40 @@ def limitations(summary: dict[str, Any]) -> list[str]:
     if src.get("nested_columns"):
         out.append(f"**Lists and objects were kept as JSON text** in {_codes(list(src['nested_columns']))}: "
                    "they are counted, but their items aren't analysed or charted.")
+    if analysis.get("time"):
+        out += _time_limitations(analysis["time"])
     if src.get("decimal_columns"):
         out.append(f"**Decimal columns were analysed as floats** ({_codes(src['decimal_columns'])}); "
                    "sums of many values can differ from exact decimal arithmetic in the last digits.")
+    return out
+
+
+def _time_limitations(time: dict[str, Any]) -> list[str]:
+    out = []
+    t, col = time.get("trend"), time["column"]
+    info = time["date_columns"][col]
+    others = [c for c in time["date_columns"] if c != col]
+    if t:
+        how = "chosen automatically" if t["period_chosen_by"] == "automatic" else "set with `--period`"
+        line = (f"**Time trend** uses {code(col)} only, by {t['period']} ({how}). It describes the past; "
+                "it isn't a forecast.")
+        if others:
+            line += (f" The other date columns ({_codes(others)}) only get the implausible-date check; "
+                     "choose one with `--date-column`.")
+        out.append(line)
+        out.append("**Gaps and spikes** are judged by a rule of thumb that assumes rows arrive at a steady "
+                   "random rate. Real activity is burstier, so treat them as places to look, not proof.")
+        if not t["checks_applied"]:
+            out.append("**Gap and spike checks skipped:** fewer than 3 complete periods with rows.")
+    if info["source"] == "text":
+        how = {"day-first": "day first, as detected",
+               "ambiguous": "month first, because no value shows the order (03/04 could be either): check it",
+               "inconsistent": "value by value, because some look day-first and others month-first: check them",
+               }.get(info["date_order"], "in their own year-first format")
+        out.append(f"**Dates parsed from text** in {code(col)} ({how}), in memory only; the file is unchanged.")
+    if info.get("unparsed"):
+        out.append(f"**{info['unparsed']:,} value(s) in {code(col)} aren't dates** and are left out of the "
+                   "time analysis.")
     return out
 
 
@@ -725,9 +865,52 @@ def _section_statistics(s: dict[str, Any]) -> str:
         )]
     if "empty" in by_kind:
         lines += ["", f"**Empty columns** (every value missing): {_codes(list(by_kind['empty']))}."]
+    lines += _time_statistics(s.get("analysis", {}).get("time"))
     if len(lines) == 1:
         lines += ["", "No columns to describe."]
     return "\n".join(lines)
+
+
+def _time_statistics(time: dict[str, Any] | None) -> list[str]:
+    if not time:
+        return []
+    col, t = time["column"], time.get("trend")
+    chosen = {"--date-column": "chosen with `--date-column`", "only date column": "the only date column",
+              "most dates": "the date column with the most dates"}[time["chosen_by"]]
+    lines = ["", "### Trend over time", ""]
+    if not t:
+        lines.append(f"No trend for {code(col)} ({chosen}): {time['note']}.")
+        return lines
+    source = ", parsed from text" if t["date_source"] == "text" else ""
+    lines.append(f"{code(col)} ({chosen}{source}), grouped by {t['period']}.")
+    counts = [p["rows"] for p in t["periods"]]
+    period = t["period"]
+    rows = [
+        ["Date range", f"{t['first'][:10]} to {t['last'][:10]} ({t['span_days']:,} days)"],
+        ["Rows used", f"{t['rows_used']:,}"],
+        [f"Rows per {period}", f"typical (median) {_num(t['typical_rows'])}, lowest {min(counts):,}, "
+                               f"highest {max(counts):,}, over {len(counts):,} {period}s"],
+    ]
+    if t["rows_missing_date"]:
+        rows.append(["Rows without a date", f"{t['rows_missing_date']:,}"])
+    if t["rows_excluded_implausible"]:
+        rows.append(["Implausible dates left out", f"{t['rows_excluded_implausible']:,}"])
+    if t["partial"]:
+        rows.append([f"Incomplete {period}s", ", ".join(p["label"] for p in t["partial"])])
+    if t["gaps"]:
+        rows.append([f"Empty {period}s (gaps)", "; ".join(
+            g["first"] if g["periods"] == 1 else f"{g['first']} to {g['last']}" for g in t["gaps"])])
+    if t["empty_periods_by_chance"]:
+        rows.append([f"Other empty {period}s", f"{t['empty_periods_by_chance']:,}: too few rows per "
+                                               f"{period} to call them gaps"])
+    if t["empty_weekend_days"]:
+        rows.append(["Empty weekend days", f"{t['empty_weekend_days']:,}: probably no activity, not missing data"])
+    if t["spikes"]:
+        rows.append(["Spikes", "; ".join(f"{sp['label']} ({sp['rows']:,} rows)" for sp in t["spikes"])])
+    if t["value_column"]:
+        rows.append(["Also shown per period", f"median of {code(t['value_column'])}"])
+    lines += ["", md_table(["Measure", "Value"], rows)]
+    return lines
 
 
 def _section_findings(findings: list[dict[str, Any]]) -> str:
@@ -820,6 +1003,23 @@ def _chart_text(c: dict[str, Any], s: dict[str, Any]) -> tuple[str, str]:
             elif len(cats) > 1:
                 text += " Every value is shown."
         return f"Most common values of {code(col)}", text
+    if kind == "time_trend":
+        t = (analysis.get("time") or {}).get("trend") or {}
+        period = c["period"]
+        text = (f"Rows per {period} from {t.get('first', '')[:10]} to {t.get('last', '')[:10]}; a typical "
+                f"{period} has {_num(t.get('typical_rows'))} rows.")
+        marks = []
+        if t.get("partial"):
+            marks.append(f"dashed ends are incomplete {period}s")
+        if t.get("gaps"):
+            marks.append(f"red bands are empty {period}s")
+        if t.get("spikes"):
+            marks.append("rings mark spikes")
+        if marks:
+            text += " " + _sentence("; ".join(marks))
+        if c.get("value_column"):
+            text += f" The lower panel shows the median {code(c['value_column'])} per {period}."
+        return f"Rows per {period} by {code(c['column'])}", text
     return kind.replace("_", " ").capitalize(), ""
 
 
