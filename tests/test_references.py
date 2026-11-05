@@ -16,6 +16,19 @@ from report import ADVICE_ALIAS, CLEANING_ADVICE
 matplotlib.use("Agg")
 
 SKILL_DIR = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "python-data-analyst"
+
+
+def _version(module) -> tuple[int, int]:
+    return tuple(int(x) for x in re.findall(r"\d+", module.__version__)[:2])
+
+
+# The guides are written for current pandas and Matplotlib and mention the older
+# spelling where it differs. The scripts themselves support the minimum versions
+# in requirements.txt; only these example runs need the new ones.
+needs_current_libraries = pytest.mark.skipif(
+    _version(pd) < (3, 0) or _version(matplotlib) < (3, 10),
+    reason="guide examples target pandas >= 3.0 and Matplotlib >= 3.10",
+)
 GUIDES = ["pandas-guide.md", "data-cleaning.md", "visualization-guide.md"]
 
 
@@ -81,6 +94,7 @@ def test_internal_links_resolve(name):
     assert set(links) <= anchors, set(links) - anchors
 
 
+@needs_current_libraries
 @pytest.mark.parametrize("name", GUIDES)
 def test_python_examples_run(name, sales_files, scripts_dir):
     path, xlsx_path, out_dir = sales_files
@@ -96,6 +110,7 @@ def test_python_examples_run(name, sales_files, scripts_dir):
     assert path.read_bytes() == before  # the examples never write to the input
 
 
+@needs_current_libraries
 def test_visualization_examples_save_charts(sales_files, scripts_dir):
     path, xlsx_path, out_dir = sales_files
     namespace = {"path": path, "xlsx_path": xlsx_path, "out_dir": out_dir, "scripts_dir": scripts_dir}
@@ -115,3 +130,15 @@ def test_cleaning_guide_covers_every_finding_rule():
 def test_palette_matches_the_scripts():
     text = _text("visualization-guide.md")
     assert f'CATEGORICAL = ["{COLOR_SERIES}"' in text  # slot 1 is the single-series blue
+
+
+def test_readme_local_links_and_images_exist():
+    root = SKILL_DIR.parents[2]
+    readme = (root / "README.md").read_text(encoding="utf-8")
+    targets = re.findall(r"\]\(([^)#]+)\)", readme) + re.findall(r'src="([^"]+)"', readme)
+    local = [t for t in targets if not t.startswith(("http://", "https://"))]
+    assert local
+    for target in local:
+        assert (root / target).exists(), target
+    anchors = {_github_anchor(h) for h in re.findall(r"^#{1,4} (.+)$", readme, flags=re.MULTILINE)}
+    assert set(re.findall(r"\]\(#([^)]+)\)", readme)) <= anchors

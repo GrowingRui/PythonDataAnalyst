@@ -279,9 +279,11 @@ def _numeric_stats(s: pd.Series) -> dict[str, Any]:
     v = s.dropna().astype(float)
     n = len(v)
     # pandas' skew() is the adjusted Fisher-Pearson coefficient; it needs >= 3 values.
-    skew = float(v.skew()) if n >= 3 else None
+    # A constant column has no spread, so skewness is undefined. pandas 3 returns
+    # NaN for it, pandas 2 returns 0.0 ("symmetric"), so decide it ourselves.
+    skew = float(v.skew()) if n >= 3 and v.nunique() > 1 else None
     if skew is not None and not math.isfinite(skew):
-        skew = None  # constant column: skewness is undefined
+        skew = None
     return {
         "kind": "numeric",
         "count": n,

@@ -3,6 +3,8 @@
 Read this when you need a chart that `generate_eda.py` doesn't produce, or
 when you're choosing which chart answers a question. The goal of every chart
 here is one clear answer to one question, readable without explanation.
+The code targets Matplotlib 3.10+ and pandas 3.x; older spellings are noted
+where they differ.
 
 **Contents**
 1. [Question → chart](#1-question--chart)
