@@ -16,7 +16,6 @@ SHA-256 is recorded before and checked after the run.
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import re
 import sys
@@ -43,6 +42,7 @@ from inspect_data import (  # noqa: E402
     DatasetError,
     classify_columns,
     describe_dataset,
+    file_sha256,
     load_dataset,
     to_jsonable,
 )
@@ -850,15 +850,6 @@ def run_eda(
     (out_dir / "summary.json").write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     write_report(summary, out_dir)
     return summary
-
-
-def file_sha256(path: Path) -> str:
-    """Fingerprint of a file, read in 1 MB chunks so large files don't fill memory."""
-    h = hashlib.sha256()
-    with open(path, "rb") as fh:
-        for chunk in iter(lambda: fh.read(1 << 20), b""):
-            h.update(chunk)
-    return h.hexdigest()
 
 
 def _source_file(df: pd.DataFrame) -> Path | None:

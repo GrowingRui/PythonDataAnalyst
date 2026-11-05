@@ -1,0 +1,24 @@
+{
+  "description": "Fixes the planted errors in sample_sales.csv. Missing discounts and delivery days, skew, outliers, the time gap and spike, and the leaky order_size are left alone: they are not errors to edit away.",
+  "steps": [
+    {"step": "drop_exact_duplicates", "fixes": "duplicate_rows",
+     "reason": "Each row is one order; identical rows are export repeats."},
+    {"step": "drop_duplicate_keys", "columns": ["order_id"], "keep": "first", "fixes": "duplicate_keys",
+     "reason": "The second copy of a repeated order_id is a later edit of quantity; keep the original."},
+    {"step": "strip_whitespace", "columns": ["region"], "fixes": "untrimmed_whitespace"},
+    {"step": "normalize_labels", "column": "region", "mapping": {"north": "North"}, "fixes": "inconsistent_labels"},
+    {"step": "placeholders_to_missing", "columns": ["rating"], "values": ["-"], "fixes": "disguised_missing",
+     "reason": "\"-\" means \"no rating\"."},
+    {"step": "placeholders_to_missing", "columns": ["delivery_days"], "values": [999], "fixes": "possible_missing_code",
+     "reason": "999 is the export's code for an unknown delivery time."},
+    {"step": "placeholders_to_missing", "columns": ["order_date"], "values": ["01/01/1900"], "fixes": "implausible_dates",
+     "reason": "1900-01-01 is a placeholder, not an order date."},
+    {"step": "to_numeric", "columns": ["shipping_cost"], "map": {"free": 0}, "fixes": "numbers_as_text",
+     "reason": "\"free\" shipping costs 0."},
+    {"step": "to_numeric", "columns": ["rating"], "fixes": "numbers_as_text"},
+    {"step": "to_datetime", "columns": ["order_date"], "day_first": true, "fixes": "dates_as_text"},
+    {"step": "drop_columns", "columns": ["legacy_code"], "fixes": "empty_columns"},
+    {"step": "drop_columns", "columns": ["currency"], "fixes": "constant_column",
+     "reason": "Always USD: the file says nothing else, so the column carries no information."}
+  ]
+}

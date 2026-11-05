@@ -6,10 +6,11 @@
 Ask your AI agent *"What's wrong with the data in sales.csv?"* and get a careful
 analyst's answer, backed by tested code: data quality problems, descriptive
 statistics, correlations, charts and a written report. Your file is never
-changed.
+changed: cleaning happens only when you approve it, on a copy, with a log of
+every change.
 
 The skill works on CSV, TSV, Excel, Parquet and JSON files with pandas, NumPy,
-Matplotlib and Seaborn. The agent runs two scripts that compute every number, then reads the
+Matplotlib and Seaborn. The agent runs scripts that compute every number, then reads the
 results and the charts and writes the interpretation.
 
 It's written in the open [Agent Skills](https://agentskills.io/) format, so it
@@ -67,7 +68,13 @@ support skills, such as OpenAI Codex, Gemini CLI, GitHub Copilot or Cursor.
   holds the same facts in machine-readable form.
 - **Never changes your data.** Problems are flagged, not fixed. The agent
   proposes cleaning steps with their consequences and waits for your
-  approval; approved steps write a new file.
+  approval.
+- **Cleans only what you approved, reproducibly:** approved steps go into a
+  `plan.json` from a fixed set of 12 tested steps (drop duplicates, turn
+  placeholders into missing values, convert numbers and dates stored as
+  text, relabel, fill or drop missing values, cap or flag outliers, ...). A
+  dry run shows every change first; `--apply` writes a **new** file with a
+  change log, and the EDA is re-run on it to show which findings went away.
 
 ## Install
 
@@ -177,6 +184,9 @@ You can also run the scripts yourself, without an agent:
 python skills/python-data-analyst/scripts/inspect_data.py data/sales.csv         # quick text summary
 python skills/python-data-analyst/scripts/inspect_data.py data/sales.csv --json  # the same as JSON
 python skills/python-data-analyst/scripts/generate_eda.py data/sales.csv         # full report + charts
+python skills/python-data-analyst/scripts/clean_data.py data/sales.csv --plan plan.json          # dry run
+python skills/python-data-analyst/scripts/clean_data.py data/sales.csv --plan plan.json --apply  # write a cleaned copy
+python skills/python-data-analyst/scripts/compare_runs.py eda_output/before eda_output/after     # what changed
 ```
 
 | Option | Script | Purpose |
@@ -194,6 +204,12 @@ python skills/python-data-analyst/scripts/generate_eda.py data/sales.csv        
 | `--date-column COL` | EDA | Date column for the time trend (default: the one with the most dates) |
 | `--period P` | EDA | `day`, `week`, `month`, `quarter` or `year` for the time trend (default: about 12–120 points) |
 | `--target COL` | EDA | Compare one column across all the others (adds report section 4b) |
+
+`clean_data.py` takes the same reading options (`--sheet`, `--json-path`,
+`--encoding`, `--delimiter`) plus `--plan FILE` (required), `--apply` (write;
+without it nothing is written), `--output FILE` (`.csv` or `.parquet` in a new
+or empty folder; default `eda_output/<file>_cleaned_<timestamp>/`), `--json`
+and `--list-steps`.
 
 ## What you get
 
@@ -232,6 +248,15 @@ An excerpt of the findings for the sample data:
 The input file's SHA-256 fingerprint is recorded before the run and checked
 after it, so the report itself shows that the data wasn't modified.
 
+After an approved cleaning run, the cleaned file's folder holds:
+
+```text
+eda_output/sales_cleaned_20261105-101500/
+├── sales_cleaned.csv    # the cleaned copy (or .parquet)
+├── cleaning_log.md      # every step: rows, missing cells and values before/after, examples, warnings
+└── cleaning_log.json    # the same, with both SHA-256 fingerprints and the plan, to rebuild the file exactly
+```
+
 ## Try it on the sample data
 
 `sample_data/sample_sales.csv` is a synthetic, deliberately messy dataset of
@@ -250,6 +275,20 @@ To see the target comparison, add `--target revenue`: `category` comes out
 far ahead of `region`, `channel` makes no difference, and `order_size` is
 flagged as possible leakage (it's a band computed from revenue itself).
 
+To try the cleaning cycle, [`sample_data/cleaning_plan.json`](sample_data/cleaning_plan.json)
+fixes the planted errors and nothing else (missing discounts, skew, the
+time gap and the leaky column are left alone: they aren't errors to edit
+away):
+
+```bash
+python skills/python-data-analyst/scripts/clean_data.py sample_data/sample_sales.csv --plan sample_data/cleaning_plan.json
+```
+
+Add `--apply` to write the copy (1,200 rows instead of 1,215, 15 columns),
+then run the EDA on it and `compare_runs.py` on the two output folders: 15
+findings go away, and one is new (`rating` now has 130 missing values, the
+cost of turning `-` into a real missing value).
+
 ## How it works
 
 ```text
@@ -260,7 +299,9 @@ skills/python-data-analyst/     # the whole skill: this folder is what gets inst
 │   ├── generate_eda.py         # correlations, categories, charts; writes the output folder
 │   ├── time_trends.py          # rows per period, gaps, spikes, implausible dates
 │   ├── target_analysis.py      # --target: groups, strengths, leakage
-│   └── report.py               # rule-based findings and report.md
+│   ├── report.py               # rule-based findings and report.md
+│   ├── clean_data.py           # approved cleaning steps: dry run, new file, change log
+│   └── compare_runs.py         # findings gone / new / changed between two EDA runs
 └── references/                 # loaded only when needed
     ├── pandas-guide.md         # reading tricky files, groupby, memory, pandas pitfalls
     ├── data-cleaning.md        # options per problem and what each one costs
@@ -274,6 +315,8 @@ The design follows a few rules:
   written for your goal and dataset.
 - **Read-only by default.** Removing outliers or filling gaps changes the
   results, so every cleaning step needs an explanation and your agreement.
+  Approved steps run from a plan through tested code, never over the
+  original, and the same plan on the same file always gives the same bytes.
 - **Progressive disclosure.** The agent reads `SKILL.md` when the skill is used,
   and the reference guides only when a question calls for them.
 - **Few dependencies.** Only pandas, NumPy, Matplotlib and Seaborn, plus
@@ -295,6 +338,7 @@ The design follows a few rules:
 | Parquet's stored types | Typed columns can't hold numbers or dates as text, so fewer type problems are found | That the values are right: the report says why type problems are absent |
 | JSON flattening | Nested objects become `parent.child` columns; lists are counted and reported | The items inside lists: they aren't analysed or charted |
 | Target comparison (`--target`) | How the target differs across groups (η on ranks, Cramér's V) and numeric columns; columns that predict it almost perfectly | Why: no significance tests, and another column can create a difference (Simpson's paradox). Groups under 30 rows aren't compared |
+| Cleaning steps (`clean_data.py`) | Exactly what changed: rows, values and missing cells per step, with examples | Whether a change was right: filling shrinks the spread, capping changes means and totals, dropping rows can bias the sample. That's why each step needs your agreement |
 | Time trend (rows per period) | When rows are missing, bunched up or misdated, for one date column | Forecasts; seasonality from less than two years of data. Gaps and spikes assume rows arrive at a steady random rate |
 
 Correlations are computed between numeric columns only, and none of them

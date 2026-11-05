@@ -5,7 +5,7 @@ license: MIT
 compatibility: Needs Python 3.11+ with pandas, NumPy, Matplotlib and Seaborn (plus OpenPyXL for Excel, PyArrow for Parquet), and an agent that can run shell commands. Viewing images is optional.
 metadata:
   author: GrowingRui
-  version: "1.4.0"
+  version: "1.5.0"
   repository: https://github.com/GrowingRui/PythonDataAnalyst
 ---
 
@@ -28,8 +28,9 @@ and its guides in `<skill-dir>/references/`.
    - what the change does,
    - how many rows or values it affects,
    - how it could bias the results,
-   and then getting the user's agreement. Approved cleaning steps write a
-   **new file** (e.g. `sales_cleaned.csv`), never over the original.
+   and then getting the user's agreement. Approved cleaning steps are
+   applied by `clean_data.py` to a **new file**, never over the original
+   (Step 6).
 3. **Numbers come from code, not from memory.** Run the scripts or pandas code
    to get every figure you report. Never estimate a statistic by eye.
 4. **Separate facts from interpretation.** Report what the data shows, then
@@ -172,11 +173,37 @@ script reports that the file changed during the run, tell the user.
   `### Analyst interpretation` subsection: the 3–7 findings that matter most
   for the user's goal, each with what you saw in the charts.
 
-### Step 6: Recommend next steps
+### Step 6: Recommend next steps, and clean only what was approved
 - Propose cleaning steps with their consequences (see
   `references/data-cleaning.md`; each section names the finding `rule`
-  values it covers). Wait for approval before applying any.
+  values it covers and the step that applies it). Wait for approval.
 - Suggest follow-up analyses that fit the goal.
+
+When the user approves cleaning, follow this cycle (details in
+`references/data-cleaning.md`, section 10):
+
+1. **Plan:** write `plan.json` with only the approved steps, each with
+   `fixes` (the finding rule) and `reason` (what the user agreed to). Steps:
+   `drop_exact_duplicates`, `drop_duplicate_keys`, `placeholders_to_missing`,
+   `strip_whitespace`, `normalize_labels`, `to_numeric`, `to_datetime`,
+   `drop_columns`, `drop_rows_missing`, `fill_missing`, `cap_outliers`,
+   `flag_outliers` (`--list-steps` shows their options). Put the plan next
+   to the EDA output, not in the data folder.
+2. **Dry run:** `python <skill-dir>/scripts/clean_data.py <dataset> --plan plan.json`
+   writes nothing. Summarise per step what changes (rows, values, examples)
+   and every warning, especially values that become missing.
+3. **Apply after a second yes:** add `--apply` (and `--output` for a chosen
+   path; `.parquet` keeps the types). It writes the cleaned file plus
+   `cleaning_log.md` and `cleaning_log.json` into a new folder.
+4. **Re-check:** run `generate_eda.py` on the cleaned file, then
+   `python <skill-dir>/scripts/compare_runs.py <old EDA folder> <new EDA folder>`.
+   Report the findings that went away, the new ones (often the cost of a
+   step) and the ones that changed, and confirm the input is unchanged
+   (`input.unchanged_after_run` in the log).
+
+A fix that no step covers is done with pandas on a copy, written to a new
+file, and reported as not being in the log. Never invent a step name: the
+script refuses unknown steps and options.
 
 ## Report structure
 
@@ -209,6 +236,8 @@ Load these only when you need them:
 - "/python-data-analyst data/sales.csv focus on regional revenue differences"
   (run with `--target revenue`)
 - "Which customers in `crm.xlsx` churn more often?" (`--target churned`)
+- "Remove the duplicates and fix the dates, then check again." (Step 6
+  cycle: plan, dry run, apply after a second yes, re-check)
 
 ## Example of a good finding
 

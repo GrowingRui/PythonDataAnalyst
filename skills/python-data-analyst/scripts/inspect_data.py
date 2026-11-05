@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import csv
 import decimal
+import hashlib
 import json
 import math
 import sys
@@ -70,6 +71,10 @@ DATE_SAMPLE_UNIQUE = 5000
 # Numbers often used to mean "unknown" or "not applicable" in exports. Reported
 # only when they are also IQR outliers, so a real 99 in a 0-100 score is left alone.
 CODE_LIKE_VALUES = (99, 999, 9999, 99999, -1, -9, -99, -999, -9999)
+# Text files can't store a date type, so a CSV or JSON column whose every value
+# is a strict ISO date ("2025-01-31", "2025-01-31 14:05:00") is the best a text
+# file can do: it's read as dates, not reported as "dates stored as text".
+ISO_DATE_PATTERN = r"^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?)?$"
 
 
 class DatasetError(ValueError):
@@ -135,6 +140,10 @@ def load_dataset(
     nested = _freeze_nested(df)
     if nested:
         source["nested_columns"] = nested
+    if source["format"] in ("csv", "json"):
+        iso = parse_iso_date_columns(df)
+        if iso:
+            source["iso_date_columns"] = iso
     source.update({"path": str(path), "file_name": path.name, "file_bytes": path.stat().st_size})
     df.attrs["source"] = source
     return df
@@ -379,6 +388,38 @@ def _to_json_text(value: Any) -> str:
             return {str(k): plain(x) for k, x in v.items()}
         return v
     return json.dumps(plain(value), ensure_ascii=False, default=str)
+
+
+def parse_iso_date_columns(df: pd.DataFrame) -> list[str]:
+    """Turn text columns that hold only strict ISO dates into datetimes, in place.
+
+    A column with even one other value stays text, so the quality check still
+    reports it. Returns the names of the converted columns.
+    """
+    converted = []
+    for c in df.columns:
+        s = df[c]
+        if pd.api.types.is_numeric_dtype(s) or pd.api.types.is_datetime64_any_dtype(s):
+            continue
+        strings = _string_values(s)
+        if strings.empty or len(strings) != int(s.notna().sum()):
+            continue
+        if not strings.str.match(ISO_DATE_PATTERN).all():
+            continue
+        parsed = pd.to_datetime(s, format="ISO8601", errors="coerce")
+        if int(parsed.notna().sum()) == len(strings):  # e.g. 2025-02-30 stays text
+            df[c] = parsed
+            converted.append(str(c))
+    return converted
+
+
+def file_sha256(path: str | Path) -> str:
+    """Fingerprint of a file, read in 1 MB chunks so large files don't fill memory."""
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def _sniff_delimiter(path: Path, encoding: str) -> str:
@@ -1037,6 +1078,8 @@ def format_text(result: dict[str, Any]) -> str:
         out.append("Lists/objects kept as JSON text: " + ", ".join(src["nested_columns"]))
     if src.get("decimal_columns"):
         out.append("Parquet decimals analysed as floats: " + ", ".join(src["decimal_columns"]))
+    if src.get("iso_date_columns"):
+        out.append("ISO dates read as dates: " + ", ".join(src["iso_date_columns"]))
     out.append("")
 
     out.append("COLUMNS")

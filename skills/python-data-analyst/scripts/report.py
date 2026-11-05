@@ -186,6 +186,26 @@ CLEANING_ADVICE: dict[str, tuple[str, str, str]] = {
 # Several findings share the same advice.
 ADVICE_ALIAS = {"missing_minor": "missing_values", "incomplete_rows": "missing_values"}
 
+# The clean_data.py steps that can apply an approved option, per advice key.
+# clean_data.py builds its "fixes" check from this table. Problems without an
+# entry are not fixed by editing values (gaps, spikes, leakage, skew, ...).
+CLEANING_STEPS: dict[str, tuple[str, ...]] = {
+    "empty_columns": ("drop_columns",),
+    "constant_column": ("drop_columns",),
+    "missing_values": ("drop_rows_missing", "fill_missing", "drop_columns"),
+    "disguised_missing": ("placeholders_to_missing",),
+    "possible_missing_code": ("placeholders_to_missing",),
+    "implausible_dates": ("placeholders_to_missing",),
+    "duplicate_rows": ("drop_exact_duplicates",),
+    "duplicate_keys": ("drop_duplicate_keys",),
+    "numbers_as_text": ("to_numeric",),
+    "mixed_types": ("to_numeric",),
+    "dates_as_text": ("to_datetime",),
+    "inconsistent_labels": ("strip_whitespace", "normalize_labels"),
+    "untrimmed_whitespace": ("strip_whitespace",),
+    "outliers": ("cap_outliers", "flag_outliers"),
+}
+
 
 # --------------------------------------------------------------------------
 # Findings
@@ -608,7 +628,8 @@ def cleaning_options(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if key not in CLEANING_ADVICE:
             continue
         label, options, cost = CLEANING_ADVICE[key]
-        entry = merged.setdefault(key, {"problem": label, "columns": [], "options": options, "cost": cost})
+        entry = merged.setdefault(key, {"problem": label, "columns": [], "options": options, "cost": cost,
+                                        "steps": list(CLEANING_STEPS.get(key, ()))})
         for c in f["columns"]:
             if c not in entry["columns"]:
                 entry["columns"].append(c)
@@ -867,6 +888,9 @@ def _section_overview(s: dict[str, Any]) -> str:
         lines.append(f"- **Flattened from nested objects:** {_codes(src['flattened_columns'])}")
     if src.get("nested_columns"):
         lines.append(f"- **Lists or objects kept as JSON text:** {_codes(list(src['nested_columns']))}")
+    if src.get("iso_date_columns"):
+        lines.append(f"- **ISO dates read as dates:** {_codes(src['iso_date_columns'])} (every value is "
+                     "`YYYY-MM-DD`, the standard way to store dates in a text file)")
     lines += ["", md_table(
         ["Column", "Kind", "dtype", "Non-missing", "Missing", "Unique"],
         [[code(c["name"]), c["kind"], f"`{c['dtype']}`", c["non_null"], _pct(missing.get(c["name"], 0.0)), c["unique"]]
@@ -1252,11 +1276,13 @@ def _section_next_steps(s: dict[str, Any], findings: list[dict[str, Any]]) -> st
     options = cleaning_options(findings)
     if options:
         lines.append("Nothing has been changed. Each option has a cost; choose deliberately and write the "
-                     "result to a new file, never over the original.")
+                     "result to a new file, never over the original. Approved options that name a step can be "
+                     "applied with `clean_data.py`, which shows a dry run first and logs every change.")
         lines.append("")
         for o in options:
             cols = f" ({_codes(o['columns'][:6])}{', ...' if len(o['columns']) > 6 else ''})" if o["columns"] else ""
-            lines.append(f"- **{o['problem']}**{cols}: {o['options']} *Cost:* {o['cost']}")
+            steps = f" *Step:* {_codes(o['steps'])}." if o["steps"] else ""
+            lines.append(f"- **{o['problem']}**{cols}: {o['options']} *Cost:* {o['cost']}{steps}")
     else:
         lines.append("No cleaning is suggested by the checks.")
     lines += ["", "### Further analysis", ""]

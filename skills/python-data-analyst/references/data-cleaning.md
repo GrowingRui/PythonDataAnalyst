@@ -18,8 +18,11 @@ rows or values it touches.
 10. [Applying approved changes](#10-applying-approved-changes)
 
 Each section names the `rule` values it covers in `summary.json` → `findings`,
-so you can go from a finding straight to its options. The examples use the
-same sales data as `pandas-guide.md` (`path`, `out_dir`).
+so you can go from a finding straight to its options, and the
+`clean_data.py` step that applies an approved option (see
+[section 10](#10-applying-approved-changes)). The pandas examples show what
+each step does and are useful for one-off checks; they use the same sales
+data as `pandas-guide.md` (`path`, `out_dir`).
 
 ```python
 from pathlib import Path
@@ -50,6 +53,9 @@ clean = df.copy()  # every example changes `clean`, never `df` and never the fil
 ## 2. Missing values
 
 Finding rules: `missing_values`, `missing_minor`, `incomplete_rows`, `empty_columns`.
+Steps: `drop_rows_missing` (in the given columns), `fill_missing` (median,
+mode or constant, optionally `by` a group column; always adds
+`<column>_was_missing`), `drop_columns`.
 
 **Why the reason for missingness matters.** Statisticians use three cases:
 
@@ -98,7 +104,8 @@ neutral default. Only use it when the user confirms that's what a gap means.
 
 ## 3. Placeholder values
 
-Finding rule: `disguised_missing`.
+Finding rule: `disguised_missing`. Step: `placeholders_to_missing` (text
+placeholders; without `values` it uses the standard list the checks look for).
 
 Values like `-`, `?`, `n/a`, `unknown` are stored as text, so pandas counts
 them as present. A numeric column containing one becomes a text column.
@@ -124,6 +131,7 @@ The skill detects only a fixed list of text placeholders.
 the mean, the spread and the skew. The skill reports them when they are also
 IQR outliers (a delivery time of 999 days). Codes inside the normal range
 (`0` for "no answer" in a 0–10 score) can't be detected: ask about them.
+Step: `placeholders_to_missing` with the confirmed codes, e.g. `"values": [999]`.
 
 ```python
 codes = clean["quantity"].isin([999, -1]).sum()  # how many rows use the code
@@ -132,7 +140,10 @@ clean["quantity"] = clean["quantity"].mask(clean["quantity"].isin([999, -1]))  #
 
 ## 4. Duplicates
 
-Finding rules: `duplicate_rows`, `duplicate_keys`.
+Finding rules: `duplicate_rows`, `duplicate_keys`. Steps:
+`drop_exact_duplicates` (keep `first` or `last`), `drop_duplicate_keys`
+(keep `first`, `last` or `most_complete`; rows without a key are never
+dropped, and the log lists the columns in which the repeats disagree).
 
 **Exact duplicates** (every column equal) are usually export or join errors,
 but not always: two identical purchases on the same day can be real. Ask
@@ -172,7 +183,11 @@ clean = (
 
 ### Numbers stored as text
 
-Finding rule: `numbers_as_text`.
+Finding rule: `numbers_as_text` (and `mixed_types` when the odd values are
+numbers). Step: `to_numeric`: currency signs, `%`, thousands separators and
+decimal commas are handled, `map` turns words into numbers (`{"free": 0}`),
+and the values that still don't parse are counted and listed before they
+become missing (or stop the run, with `"unparseable": "error"`).
 
 Caused by currency signs, `%`, thousands separators, decimal commas, or a few
 text values mixed in. Until converted, the column can't be summed or
@@ -200,7 +215,9 @@ than `0.12` (decide which and say so).
 
 ### Dates stored as text
 
-Finding rule: `dates_as_text`.
+Finding rule: `dates_as_text`. Step: `to_datetime` with `day_first` or an
+explicit `format`; without either it uses the order the values settle and
+refuses to guess when they don't.
 
 ```python
 parsed = pd.to_datetime(clean["order_date"], format="%d/%m/%Y", errors="coerce")
@@ -258,7 +275,10 @@ things: check which ones the file has before treating them alike.
 
 ### Inconsistent labels and stray spaces
 
-Finding rules: `inconsistent_labels`, `untrimmed_whitespace`.
+Finding rules: `inconsistent_labels`, `untrimmed_whitespace`. Steps:
+`strip_whitespace`, then `normalize_labels` with an explicit mapping (the
+log warns about mapping keys that match nothing and labels still written
+in more than one way).
 
 `"North"`, `"north"` and `"North "` are three groups to pandas, so counts
 and group statistics are split.
@@ -282,7 +302,9 @@ almost always, except in fixed-width codes where spaces are part of the value.
 
 ## 6. Outliers
 
-Finding rule: `outliers`.
+Finding rule: `outliers`. Steps: `flag_outliers` (adds `<column>_outlier`,
+changes nothing) and `cap_outliers` (to the IQR fences; the log shows the
+mean, standard deviation and maximum before and after).
 
 An IQR outlier is *unusual*, not *wrong*. Three very different situations
 look the same in the box plot:
@@ -343,8 +365,8 @@ log_revenue = np.log1p(df["revenue"])  # log(1 + x): works with zeros, not with 
 Cost of a log transform: differences become ratios (a coefficient means "10%
 more", not "10 more"), and results must be transformed back to explain them.
 
-**Constant columns** (one value) carry no information within this file. Drop
-them from the analysis, but ask why they're constant: a filter applied during
+**Constant columns** (one value) carry no information within this file
+(step: `drop_columns`). Drop them from the analysis, but ask why they're constant: a filter applied during
 export (`country = DE` only) limits what the whole analysis can claim.
 
 **Nearly constant columns** (one value ≥ 95%) are kept. Warn that statistics
@@ -404,7 +426,7 @@ per_day = monthly / covered
 | Finding | Options | Cost |
 |---|---|---|
 | `implausible_dates`: future dates | Check the source; correct an obvious typo (2052 for 2025) only when the owner confirms it, otherwise make it missing | A future date can be right: due dates and planned deliveries are in the future by design |
-| `implausible_dates`: placeholders (`1900-01-01`, `1970-01-01`) | Make them missing (`mask`, above) | More missing dates, but no fake history: a 1900 order date stretches every range and age |
+| `implausible_dates`: placeholders (`1900-01-01`, `1970-01-01`) | Make them missing (`mask`, above; step `placeholders_to_missing`, on the text before `to_datetime` or on the dates after it) | More missing dates, but no fake history: a 1900 order date stretches every range and age |
 | `date_gaps` | Ask whether the period is missing from the export or really had no activity. Compare periods outside the gap only, or mark it in every chart | **Never** fill a gap with zeros or interpolated values: that invents data. Ignoring it understates totals and averages |
 | `date_spike` | Look at the rows in the spike period: many rows on one date, repeated keys or exact duplicates point to a double or late load. Deduplicate, or use a different date column (`--date-column`) | Removing a real peak (a sale, a launch) deletes the most important event in the data |
 | `partial_period` | Leave the first or last period out of comparisons, or compare rows per covered day (`per_day`, above) | Dropping the rows themselves loses real data from totals; they're only a problem when compared as if complete |
@@ -434,38 +456,70 @@ that removes rows or changes values its own.
 
 ## 10. Applying approved changes
 
-Apply only the approved steps, in the order of the ground rules, and keep a
-log with counts:
+Approved steps are applied by `scripts/clean_data.py`, not by ad-hoc pandas:
+each step is tested, the input file is only read, and every change is
+logged. Write the approved options into a plan, in the order of the ground
+rules (types and placeholders, then duplicates, then missing values, then
+outliers):
 
-```python
-log = []
-
-
-def step(description: str, before: pd.DataFrame, after: pd.DataFrame) -> None:
-    log.append({
-        "step": description,
-        "rows_before": len(before),
-        "rows_after": len(after),
-        "missing_before": int(before.isna().sum().sum()),
-        "missing_after": int(after.isna().sum().sum()),
-    })
-
-
-result = df.copy()
-
-new = result.assign(region=result["region"].str.strip().str.title())
-step("Trim and title-case region", result, new)
-result = new
-
-new = result.drop_duplicates()
-step("Drop exact duplicate rows", result, new)
-result = new
-
-target = out_dir / "sales_cleaned.csv"
-assert target.resolve() != Path(path).resolve(), "never overwrite the input file"
-result.to_csv(target, index=False)
-pd.DataFrame(log).to_csv(out_dir / "cleaning_log.csv", index=False)
+```json
+{
+  "steps": [
+    {"step": "placeholders_to_missing", "columns": ["rating"], "values": ["-"],
+     "fixes": "disguised_missing", "reason": "\"-\" means no rating (confirmed)"},
+    {"step": "to_numeric", "columns": ["rating"], "fixes": "numbers_as_text"},
+    {"step": "strip_whitespace", "columns": ["region"]},
+    {"step": "normalize_labels", "column": "region", "mapping": {"north": "North"}},
+    {"step": "drop_exact_duplicates", "fixes": "duplicate_rows"}
+  ]
+}
 ```
 
-Then rerun `generate_eda.py` on the cleaned file and compare the key numbers
-with the original run. Name any finding that changed.
+`fixes` (the finding rule) and `reason` (what the user agreed to) are
+optional but go into the log. `--list-steps` prints every step with its
+options. Then:
+
+```bash
+python <skill-dir>/scripts/clean_data.py sales.csv --plan plan.json            # dry run: writes nothing
+python <skill-dir>/scripts/clean_data.py sales.csv --plan plan.json --apply    # after the user says yes again
+```
+
+The dry run shows, per step, the rows and missing cells before and after,
+how many values change, examples (`row 19 rating: '-' -> missing`) and
+warnings (values that won't parse, mapping keys that match nothing, the
+mean and spread that capping changes). Show it to the user before
+`--apply`. The script stops with a clear error, and writes nothing, when a
+step names a column that doesn't exist at that point, the output is the
+input file, or the output folder isn't empty.
+
+`--apply` writes the cleaned file (CSV, or Parquet with `--output x.parquet`,
+the default for Parquet input) with `cleaning_log.md` and
+`cleaning_log.json` next to it: every step with its counts, the SHA-256 of
+input and output, and the plan. Passing `cleaning_log.json` back as `--plan`
+rebuilds the same file byte for byte. CSV columns of codes such as
+`01234` are kept as text, so no leading zero is lost.
+
+Then rerun the EDA on the cleaned file and compare the two runs:
+
+```bash
+python <skill-dir>/scripts/generate_eda.py <cleaned file> --output eda_output/sales_cleaned
+python <skill-dir>/scripts/compare_runs.py eda_output/sales_before eda_output/sales_cleaned
+```
+
+Report the findings that went away, the new ones (usually the cost of a
+step: placeholders turned into missing values raise a missing-value count)
+and the ones that changed.
+
+**A fix outside the fixed steps** (merging two columns, correcting one
+known value) is done with pandas on a copy, written to a new file, and
+reported to the user as not covered by `cleaning_log.md`:
+
+```python
+fixed = df.copy()
+wrong = fixed["order_id"] == 100127
+fixed.loc[wrong, "quantity"] = 3  # confirmed by the data owner for this one order
+manual_log = [{"change": "order 100127: quantity set to 3", "rows": int(wrong.sum())}]
+target = out_dir / "sales_fixed.csv"
+assert target.resolve() != Path(path).resolve(), "never overwrite the input file"
+fixed.to_csv(target, index=False)
+```
