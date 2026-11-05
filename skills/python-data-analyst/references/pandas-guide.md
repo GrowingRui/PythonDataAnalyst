@@ -207,6 +207,31 @@ Notes:
 - Report the group size next to every group statistic. A median of 3 rows
   isn't comparable to a median of 3,000.
 
+### Comparing groups fairly
+
+`generate_eda.py --target revenue` does this for every column. By hand:
+
+```python
+# Median and size per group; the mean alone hides skew, and small groups are noise.
+per_region = dated.groupby("region")["revenue"].agg(rows="size", median="median", mean="mean")
+per_region["too_small"] = per_region["rows"] < 30
+
+# Simpson's paradox check: does the difference hold *inside* each group of a second column?
+dated["basket"] = pd.cut(dated["quantity"], bins=[0, 2, 10], labels=["1-2 items", "3+ items"])
+within = dated.pivot_table(index="basket", columns="region", values="revenue", aggfunc="median",
+                           observed=True)
+mix = pd.crosstab(dated["region"], dated["basket"], normalize="index")  # each region's share of big baskets
+
+# Leakage check: groups whose target ranges don't overlap were probably made from the target.
+ranges = dated.groupby("basket", observed=True)["quantity"].agg(["min", "max"])
+```
+
+If one region has the highest median overall but not inside either basket
+size, the overall difference comes from its *mix* of baskets (`mix`), not
+from the region. That reversal is Simpson's paradox. And `ranges` shows
+`basket` is a band of `quantity`: no overlap, so it "predicts" quantity
+perfectly while explaining nothing.
+
 ## 6. Large data and memory
 
 ```python

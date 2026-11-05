@@ -6,6 +6,7 @@ Usage:
     python generate_eda.py big.csv --max-categories 8 --max-scatter-points 3000
     python generate_eda.py export.json --json-path data.orders
     python generate_eda.py orders.csv --date-column shipped_at --period month
+    python generate_eda.py sales.csv --target revenue
 
 Writes a new folder (default ./eda_output/<dataset>_<timestamp>/) containing
 report.md, summary.json and charts/*.png. The input file is only ever read; its
@@ -46,6 +47,14 @@ from inspect_data import (  # noqa: E402
     to_jsonable,
 )
 from report import build_findings, write_report  # noqa: E402
+from target_analysis import (  # noqa: E402
+    MAX_CLASSES,
+    MISSING_LABEL,
+    OTHER_LABEL,
+    fold_groups,
+    strength_label,
+    target_summary,
+)
 from time_trends import PERIOD_NAMES, time_summary  # noqa: E402
 
 # --------------------------------------------------------------------------
@@ -56,6 +65,7 @@ DEFAULT_MAX_CATEGORIES = 10
 DEFAULT_MAX_SCATTER_POINTS = 5000
 DEFAULT_MAX_CHARTS = 40
 TOP_SCATTER_PAIRS = 3
+TOP_TARGET_CHARTS = 3  # group columns charted against --target, strongest first
 ID_MIN_ROWS = 20  # a 1, 2, 3, ... column this long is treated as a row counter
 HEATMAP_MAX_COLUMNS = 20  # more than this and the cells become unreadable
 HEATMAP_ANNOTATE_MAX = 12  # print r in each cell up to this many columns
@@ -79,6 +89,10 @@ COLOR_MUTED = "#898781"
 COLOR_GRID = "#e1e0d9"
 COLOR_AXIS = "#c3c2b7"
 COLOR_PROBLEM = "#e34948"  # red, palette slot 8: empty periods in the time chart
+COLOR_SERIES_LIGHT = "#cde2fb"  # box fill
+COLOR_OTHER_LIGHT = "#ecebe7"  # box fill for groups too small to compare
+# The 8 categorical slots in fixed order (visualization-guide.md, section 3): classes of a target.
+CATEGORICAL = ("#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948")
 DIVERGING = LinearSegmentedColormap.from_list(
     "blue_gray_red", ["#184f95", "#2a78d6", "#86b6ef", "#f0efec", "#f0a3a2", "#e34948", "#a32b2a"]
 )
@@ -216,20 +230,6 @@ def correlations(df: pd.DataFrame, columns: list[str]) -> dict[str, Any]:
         "spearman": _matrix(spearman),
         "pairs": pairs,
     }
-
-
-def strength_label(r: float) -> str:
-    """Common rule of thumb for |r|. Context matters: 0.3 can be important in social data."""
-    r = abs(r)
-    if r < 0.1:
-        return "negligible"
-    if r < 0.3:
-        return "weak"
-    if r < 0.5:
-        return "moderate"
-    if r < 0.7:
-        return "strong"
-    return "very strong"
 
 
 def categorical_summary(df: pd.DataFrame, kinds: dict[str, str], max_categories: int) -> dict[str, Any]:
@@ -597,6 +597,114 @@ def _time_line(ax, x, y: np.ndarray, partial: set[int], label: str):
     return line
 
 
+def chart_target_box(df: pd.DataFrame, target: dict[str, Any], entry: dict[str, Any], path: Path) -> dict[str, Any]:
+    """Box plots of a numeric target per group, sorted by median, with n per group.
+
+    Groups too small to compare, "Other" and "(missing)" are drawn in gray.
+    A skewed, positive target gets a log axis (the same rule as the log histogram).
+    The boxes are then computed on log10 values, so the 1.5 x IQR whiskers are
+    symmetric on the axis the reader sees (linear whiskers on a log axis would
+    put every dot on the right).
+    """
+    col, name = entry["column"], target["column"]
+    data = df[df[name].notna()]
+    groups = fold_groups(data[col], target["max_groups"])
+    y = data[name].astype(float)
+    ordered = entry["groups"][::-1]  # highest median at the top
+    log = bool(target.get("log_scale"))
+    values = [np.log10(v) if log else v for v in (y[groups == g["value"]].to_numpy() for g in ordered)]
+    gray = [g["small"] or g["value"] in (OTHER_LABEL, MISSING_LABEL) for g in ordered]
+    labels = [_group_label(g) for g in ordered]
+    fig, ax = _new_fig(7.5, max(2.4, 0.45 * len(ordered) + 1.5))
+    boxes = ax.boxplot(
+        values, **_HORIZONTAL_BOX, widths=0.55, patch_artist=True, whis=1.5,
+        medianprops={"color": COLOR_INK, "linewidth": 1.5},
+        flierprops={"marker": "o", "markersize": 3, "markeredgecolor": COLOR_SURFACE, "markeredgewidth": 0.4,
+                    "alpha": 0.6},
+    )
+    for i, is_gray in enumerate(gray):
+        edge = COLOR_OTHER if is_gray else COLOR_SERIES
+        boxes["boxes"][i].set(facecolor=COLOR_OTHER_LIGHT if is_gray else COLOR_SERIES_LIGHT, edgecolor=edge,
+                              linewidth=1.2)
+        for part in ("whiskers", "caps"):
+            for line in boxes[part][2 * i: 2 * i + 2]:
+                line.set(color=edge, linewidth=1.2)
+        boxes["fliers"][i].set(markerfacecolor=edge)
+    ax.set_yticks(range(1, len(labels) + 1))
+    ax.set_yticklabels(labels)
+    if log:
+        plain = _number_formatter(float(y.max()))
+        ax.xaxis.set_major_locator(MaxNLocator(integer=True))
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda x, pos: plain(10 ** x, pos)))
+    else:
+        ax.xaxis.set_major_formatter(_number_formatter(float(y.abs().max()) if len(y) else 1.0))
+    ax.grid(axis="y", visible=False)
+    ax.set_xlabel(f"{name} (log scale)" if log else name)
+    sub = f"η = {_fmt_strength(entry)}  ·  line = median, box = middle 50%"
+    if entry.get("leakage"):
+        sub += "  ·  groups don't overlap: possible leakage"
+    if any(gray):
+        sub += f"  ·  gray: under {target['min_group_rows']} rows, Other or missing"
+    _titles(ax, f"{name} by {col}", sub)
+    _save(fig, path)
+    return {"type": "target_box", "column": col, "target": name, "groups": len(ordered),
+            "log_scale": log}
+
+
+def chart_target_rates(target: dict[str, Any], entry: dict[str, Any], path: Path) -> dict[str, Any]:
+    """Two classes: the rate of the focus class per group. More classes: 100% stacked bars."""
+    col, name, focus = entry["column"], target["column"], target.get("focus_class")
+    groups = entry["groups"][::-1]  # first group at the top
+    labels = [_group_label(g) for g in groups]
+    gray = [g["small"] or g["value"] in (OTHER_LABEL, MISSING_LABEL) for g in groups]
+    fig, ax = _new_fig(7.5, max(2.4, 0.42 * len(groups) + 1.6))
+    height = _bar_height(len(groups))
+    if focus is not None:
+        rates = [g["rates"][focus] for g in groups]
+        ax.barh(labels, rates, height=height, color=[COLOR_OTHER if g else COLOR_SERIES for g in gray])
+        for i, r in enumerate(rates):
+            ax.text(r, i, f"  {r:.1f}%", va="center", fontsize=9, color=COLOR_INK_2)
+        overall = next(c["pct"] for c in target["classes"] if c["value"] == focus)
+        ax.axvline(overall, color=COLOR_INK, linewidth=1.2, linestyle=(0, (4, 3)))
+        ax.set_xlim(0, min(100, max(max(rates), overall) * 1.3 + 1))
+        ax.set_xlabel(f"share of rows where {name} = {focus}")
+        sub = f"Cramér's V = {_fmt_strength(entry)}  ·  dashed line = all rows ({overall:.1f}%)"
+        title = f"{name} = {focus}: rate by {col}"
+    else:
+        classes = [c["value"] for c in target["classes"]]
+        left = np.zeros(len(groups))
+        for k, cls in enumerate(classes):
+            share = np.array([g["rates"][cls] for g in groups])
+            ax.barh(labels, share, left=left, height=height, color=CATEGORICAL[k], label=_short(cls, 20),
+                    edgecolor=COLOR_SURFACE, linewidth=0.8)
+            left += share
+        ax.set_xlim(0, 100)
+        ax.set_xlabel(f"share of rows per class of {name}")
+        ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.22), ncol=min(len(classes), 4), fontsize=8.5,
+                  labelcolor=COLOR_INK_2)
+        sub = f"Cramér's V = {_fmt_strength(entry)}  ·  each bar adds up to 100%"
+        title = f"{name} by {col}"
+    if any(gray):
+        sub += f"  ·  gray: under {target['min_group_rows']} rows, Other or missing"
+    ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _p: f"{x:g}%"))
+    ax.grid(axis="y", visible=False)
+    _titles(ax, title, sub)
+    _save(fig, path)
+    return {"type": "target_rates", "column": col, "target": name, "groups": len(groups)}
+
+
+def _group_label(g: dict[str, Any]) -> str:
+    """Group name with its size; quoted when stray spaces would otherwise be invisible."""
+    v = _short(g["value"], 24)
+    if v != v.strip():
+        v = f"'{v}'"
+    return f"{v}  (n={g['count']:,})"
+
+
+def _fmt_strength(entry: dict[str, Any]) -> str:
+    return f"{entry['strength']:.2f} ({entry['strength_label']})"
+
+
 # --------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------
@@ -627,6 +735,7 @@ def run_eda(
     max_charts: int = DEFAULT_MAX_CHARTS,
     date_column: str | None = None,
     period: str | None = None,
+    target: str | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
     """Analyse ``df``, write charts, summary.json and report.md into ``out_dir``, return the summary.
@@ -642,9 +751,14 @@ def run_eda(
     # Columns given with --key are identifiers by definition, even when they
     # repeat (which is exactly what the key check is there to catch).
     ids += [k for k in key_columns or [] if kinds.get(k) == "numeric" and k not in ids]
-    # Before the output folder exists: a wrong --date-column or --period leaves nothing behind.
-    time = time_summary(df, kinds, summary["quality"]["type_issues"], date_column=date_column,
-                        period=period, exclude_values=ids, now=now)
+    # Before the output folder exists: a wrong --target, --date-column or --period leaves nothing behind.
+    type_issues = summary["quality"]["type_issues"]
+    target_info = (target_summary(df, target, kinds, type_issues, ids, max_groups=max_categories)
+                   if target is not None else None)
+    # A numeric target is also the value shown per period in the time chart.
+    value_column = target if target_info and target_info["kind"] == "numeric" else None
+    time = time_summary(df, kinds, type_issues, date_column=date_column, period=period,
+                        value_column=value_column, exclude_values=ids, now=now)
     out_dir = prepare_output_dir(Path(out_dir))
     charts_dir = out_dir / "charts"
     corr = correlations(df, correlation_columns(df, kinds, ids))
@@ -652,6 +766,9 @@ def run_eda(
 
     # Planned charts in priority order; the cap cuts from the end.
     plan: list[tuple[str, Any]] = [("missing", None)]
+    if target_info:  # what the user asked about comes first
+        charted = [e for e in target_info["by_group"] if e["strength"] is not None][:TOP_TARGET_CHARTS]
+        plan += [("target", e) for e in charted]
     if time and time["trend"]:
         plan.append(("time", None))
     plan.append(("heatmap", None))
@@ -684,6 +801,10 @@ def run_eda(
             elif kind == "time":
                 path = charts_dir / f"{prefix}_time_{_slug(time['column'])}_by_{time['trend']['period']}.png"
                 info = chart_time(time, path)
+            elif kind == "target":
+                path = charts_dir / f"{prefix}_target_{_slug(target)}_by_{_slug(item['column'])}.png"
+                info = (chart_target_box(df, target_info, item, path) if target_info["kind"] == "numeric"
+                        else chart_target_rates(target_info, item, path))
             elif kind == "scatter":
                 path = charts_dir / f"{prefix}_scatter_{_slug(item['a'])}__{_slug(item['b'])}.png"
                 info = chart_scatter(df, item, max_scatter_points, path)
@@ -706,6 +827,7 @@ def run_eda(
         "correlations": corr,
         "categorical": cats,
         "time": time,
+        "target": target_info,
     }
     summary["charts"] = charts
     summary["charts_skipped"] = skipped
@@ -716,6 +838,7 @@ def run_eda(
         "key_columns": key_columns,
         "date_column": date_column,
         "period": period,
+        "target": target,
         "generated_at": datetime.now().isoformat(timespec="seconds"),
     }
     summary = to_jsonable(summary)
@@ -747,6 +870,8 @@ def _source_file(df: pd.DataFrame) -> Path | None:
 def _describe_plan_item(kind: str, item: Any) -> str:
     if kind == "scatter":
         return f"scatter {item['a']} vs {item['b']}"
+    if kind == "target":
+        return f"target by {item['column']}"
     return f"{kind} {item}" if item is not None else kind
 
 
@@ -790,6 +915,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--date-column", help="date column for the time trend (default: the one with the most dates)")
     p.add_argument("--period", choices=PERIOD_NAMES,
                    help="period for the time trend (default: chosen so the chart has about 12-120 points)")
+    p.add_argument("--target", help="column to centre the analysis on (e.g. revenue, churned): compared across "
+                                    "the groups of every categorical column and with every numeric column; "
+                                    f"a categorical target can have at most {MAX_CLASSES} classes")
     return p
 
 
@@ -815,7 +943,7 @@ def main(argv: list[str] | None = None) -> int:
         keys = [k.strip() for k in args.key.split(",")] if args.key else None
         summary = run_eda(df, out_dir, key_columns=keys, max_categories=args.max_categories,
                           max_scatter_points=args.max_scatter_points, max_charts=args.max_charts,
-                          date_column=args.date_column, period=args.period)
+                          date_column=args.date_column, period=args.period, target=args.target)
     except DatasetError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
@@ -834,6 +962,13 @@ def main(argv: list[str] | None = None) -> int:
               f"({len(t['periods'])} points)")
     elif time:
         print(f"Time trend: none for {time['column']} ({time['note']})")
+    tgt = summary["analysis"]["target"]
+    if tgt:
+        print(f"Target: {tgt['column']} ({tgt['kind']}, {tgt['rows_used']:,} rows used)")
+        ranked = sorted(tgt["by_group"] + tgt["by_numeric"], key=lambda e: -(e["strength"] or 0))
+        for e in ranked[:5]:
+            leak = "  <- possible leakage" if e.get("leakage") else ""
+            print(f"  {e['column']}: {e['strength_label'] or 'not computable'} ({e['strength']}){leak}")
     pairs = summary["analysis"]["correlations"]["pairs"][:3]
     if pairs:
         print("Strongest correlations:")

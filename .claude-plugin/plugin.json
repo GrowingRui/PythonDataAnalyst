@@ -1,6 +1,6 @@
 {
   "name": "python-data-analyst",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "description": "Careful exploratory data analysis (EDA) of CSV, Excel, Parquet and JSON files with pandas, NumPy, Matplotlib and Seaborn: data quality checks, statistics, charts and a Markdown report. Never changes your data.",
   "author": {
     "name": "GrowingRui"

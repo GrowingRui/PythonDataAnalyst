@@ -31,6 +31,9 @@ CORR_MEDIUM = 0.7
 CORR_REDUNDANT = 0.98  # almost perfect: one column may be derived from the other
 CORR_FINDINGS_MAX = 10  # wide data could otherwise produce hundreds of pairs
 SMALL_DATA_ROWS = 30
+TARGET_FINDING = 0.3  # strength (eta, Cramér's V) from "moderate" upwards becomes a finding
+TARGET_MEDIUM = 0.5
+TARGET_DETAIL_COLUMNS = 3  # group columns with a full per-group table in section 4b
 
 SEVERITY_ORDER = {"high": 0, "medium": 1, "low": 2}
 
@@ -43,6 +46,7 @@ REPORT_SECTIONS = (
     "6. Suggested next steps",
     "7. Limitations",
 )
+TARGET_SECTION = "4b. Target comparison"  # only when --target is used, between sections 4 and 5
 
 # The agent replaces this marker with an "Analyst interpretation" subsection.
 INTERPRETATION_MARKER = (
@@ -164,6 +168,13 @@ CLEANING_ADVICE: dict[str, tuple[str, str, str]] = {
         "Check the spike period for duplicate or late-loaded rows: rows sharing a key, or many rows stamped "
         "with one date. If it's a loading artefact, deduplicate or use a better date column if there is one.",
         "Removing a real peak (a sale, a campaign) hides the most important event in the data.",
+    ),
+    "possible_leakage": (
+        "Possible target leakage",
+        "Find out how the column is made and when it's filled in. If it's computed from the target or recorded "
+        "after the outcome, leave it out of any model or comparison meant to explain the target.",
+        "Leaving out a genuinely strong predictor loses information; keeping a leaky one makes a model look far "
+        "better than it will be on new data, where the column isn't known yet.",
     ),
     "partial_period": (
         "Incomplete first or last period",
@@ -336,7 +347,10 @@ def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
             f"outside the IQR fences", " ".join(parts), o["outlier_pct"])
 
     # --- relationships ------------------------------------------------------------
-    pairs = [p for p in analysis.get("correlations", {}).get("pairs", []) if _pair_strength(p) >= CORR_FINDING]
+    target = analysis.get("target") or {}
+    leaked = {(target["column"], e["column"]) for e in target.get("leakage", [])} if target else set()
+    pairs = [p for p in analysis.get("correlations", {}).get("pairs", []) if _pair_strength(p) >= CORR_FINDING
+             and (p["a"], p["b"]) not in leaked and (p["b"], p["a"]) not in leaked]  # reported as leakage
     for p in pairs[:CORR_FINDINGS_MAX]:
         strength = _pair_strength(p)
         redundant = p["pearson"] is not None and abs(p["pearson"]) >= CORR_REDUNDANT
@@ -365,6 +379,7 @@ def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
             "All pairs, ranked by strength, are in `summary.json` under `analysis.correlations.pairs`.")
 
     _time_findings(analysis.get("time"), add)
+    _target_findings(analysis.get("target"), add)
 
     if ids:
         add("id_columns", "low", sorted(ids),
@@ -446,6 +461,59 @@ def _time_findings(time: dict[str, Any] | None, add) -> None:
             f"The data runs from {t['first'][:10]} to {t['last'][:10]}: {covers}. Their counts look like "
             f"drops but cover only part of the {period}; the chart draws them dashed. Leave them out when "
             "comparing periods.", 0)
+
+
+def _target_findings(target: dict[str, Any] | None, add) -> None:
+    """Possible leakage, and the group differences in the target worth a look."""
+    if not target:
+        return
+    name = target["column"]
+    for e in target["by_group"] + target["by_numeric"]:
+        leak = e.get("leakage")
+        if not leak:
+            continue
+        how = {
+            "correlation": f"|r| or |ρ| = {_strength(leak['value'])}",
+            "separation": f"chance-corrected separation {_strength(leak['value'])}",
+            "lambda": f"Goodman–Kruskal λ = {_strength(leak['value'])}",
+        }[leak["measure"]]
+        add("possible_leakage", "high", [e["column"], name],
+            f"{code(e['column'])} predicts {code(name)} almost perfectly: possible target leakage ({how})",
+            f"{_sentence(leak['detail'])} Such a column is usually computed from the target (a band, the same "
+            "amount in another currency) or filled in after the outcome is known (a cancellation reason). "
+            "It explains nothing about why the target varies, and a model using it fails on new data. Check "
+            "how the column is made before using it.", 200 + leak["value"])
+
+    for e in target["by_group"] + (target["by_numeric"] if target["kind"] == "categorical" else []):
+        s = e["strength"]
+        if s is None or s < TARGET_FINDING or e.get("leakage"):
+            continue
+        measure = "Cramér's V" if e["measure"] == "cramers_v" else "η"
+        title = (f"{code(name)} differs {e['strength_label']}ly by {code(e['column'])} "
+                 f"({measure} = {_strength(s)})")
+        detail = _target_difference_detail(target, e)
+        detail += (" A difference between groups isn't a cause: another column (the mix of products, "
+                   "customers or time) can produce it. No significance test was run.")
+        add("target_difference", "medium" if s >= TARGET_MEDIUM else "low", [e["column"], name], title, detail, s)
+
+
+def _target_difference_detail(target: dict[str, Any], e: dict[str, Any]) -> str:
+    name = target["column"]
+    hi, lo = e.get("highest"), e.get("lowest")
+    if target["kind"] == "numeric" and hi and lo:
+        text = (f"Median {code(name)} is highest for {code(hi['value'])} ({_num(hi['median'])}, n = {hi['count']:,}) "
+                f"and lowest for {code(lo['value'])} ({_num(lo['median'])}, n = {lo['count']:,})")
+        if e.get("median_ratio"):
+            text += f", {_num(e['median_ratio'], 2)}×"
+        return text + "."
+    if target["kind"] == "categorical" and hi and lo:
+        focus = target["focus_class"]
+        return (f"The share of {code(focus)} is highest for {code(hi['value'])} ({_pct(hi['rate'])}, "
+                f"n = {hi['count']:,}) and lowest for {code(lo['value'])} ({_pct(lo['rate'])}, n = {lo['count']:,}).")
+    if e.get("classes"):
+        meds = ", ".join(f"{code(c['value'])} {_num(c['median'])}" for c in e["classes"])
+        return f"Median {code(e['column'])} per class of {code(name)}: {meds}."
+    return "See section 4b for the values per group."
 
 
 def _type_issue_title(i: dict[str, Any]) -> str:
@@ -573,9 +641,13 @@ def analysis_suggestions(summary: dict[str, Any], findings: list[dict[str, Any]]
         out.append(f"Plot how {_codes(numeric[:3])} change over time using {code(dates[0])}"
                    + (" (after parsing the dates)." if dates[0] not in st or st[dates[0]].get("kind") != "datetime"
                       else "."))
-    if categorical and numeric:
+    target = summary.get("analysis", {}).get("target")
+    if target:
+        out += _target_suggestions(target)
+    elif categorical and numeric:
         out.append(f"Compare {code(numeric[0])} across the groups of {code(categorical[0])}: medians and "
-                   "box plots per group (`df.groupby(...)[...].describe()`).")
+                   "box plots per group (`df.groupby(...)[...].describe()`). Run again with "
+                   f"`--target {numeric[0]}` to do this for every column.")
     if rules & {"strong_correlation", "near_duplicate_columns"}:
         out.append("For the strongest pairs, look at the scatter plots and ask whether a third variable "
                    "(time, size, region) could drive both.")
@@ -586,6 +658,25 @@ def analysis_suggestions(summary: dict[str, Any], findings: list[dict[str, Any]]
     if gaps:
         out.append(f"Check whether the gaps in {_codes(gaps[:3])} depend on other columns (compare the "
                    "missing rate across groups). That shows whether dropping rows would bias the results.")
+    return out
+
+
+def _target_suggestions(target: dict[str, Any]) -> list[str]:
+    out = []
+    name = target["column"]
+    usable = [e["column"] for e in target["by_group"] if e["strength"] is not None and not e.get("leakage")]
+    if len(usable) >= 2:
+        a, b = usable[0], usable[1]
+        how = (f"`df.groupby(['{b}', '{a}'])['{name}'].median().unstack()`" if target["kind"] == "numeric"
+               else f"`pd.crosstab([df['{b}'], df['{a}']], df['{name}'], normalize='index')`")
+        out.append(f"Check whether the differences in {code(name)} by {code(a)} hold within each group of "
+                   f"{code(b)} ({how}). A difference that shrinks or reverses inside the groups comes from the "
+                   f"mix of {code(b)}, not from {code(a)} itself (Simpson's paradox).")
+    if target["leakage"]:
+        out.append(f"Leave {_codes([e['column'] for e in target['leakage']])} out when explaining or predicting "
+                   f"{code(name)} until you know how {'it is' if len(target['leakage']) == 1 else 'they are'} made.")
+    out.append("Before acting on a difference, check that it also shows up in other data (another period, "
+               "another export): with many columns compared, some differences appear by chance.")
     return out
 
 
@@ -643,9 +734,35 @@ def limitations(summary: dict[str, Any]) -> list[str]:
                    "they are counted, but their items aren't analysed or charted.")
     if analysis.get("time"):
         out += _time_limitations(analysis["time"])
+    if analysis.get("target"):
+        out += _target_limitations(analysis["target"])
     if src.get("decimal_columns"):
         out.append(f"**Decimal columns were analysed as floats** ({_codes(src['decimal_columns'])}); "
                    "sums of many values can differ from exact decimal arithmetic in the last digits.")
+    return out
+
+
+def _target_limitations(target: dict[str, Any]) -> list[str]:
+    name = target["column"]
+    out = [
+        f"**Target comparison is descriptive.** It shows how {code(name)} differs between groups; it doesn't "
+        "show why. A difference can come from another column (Simpson's paradox), and no significance tests "
+        "were run, so small differences, especially in small groups, may be noise.",
+        f"**Groups with fewer than {target['min_group_rows']} rows** are shown but marked too small to compare. "
+        f"Only the {target['max_groups']} most common values of each column are kept; the rest are combined "
+        "as `Other` (set with `--max-categories`).",
+        "**Leakage is only caught when it's almost perfect** (strength ≥ "
+        f"{target['leak_threshold']:g}). A column filled in after the outcome but noisy isn't flagged: know "
+        "when each column is recorded.",
+    ]
+    if target["rows_missing_target"]:
+        pct = 100 * target["rows_missing_target"] / max(target["rows_total"], 1)
+        out.append(f"**{target['rows_missing_target']:,} row(s) ({_pct(pct)}) have no {code(name)}** and are "
+                   "left out of the target comparison.")
+    skipped = [s for s in target["skipped"] if s["reason"] not in ("empty", "the same value in every row")]
+    if skipped:
+        listed = "; ".join(f"{code(s['column'])} ({s['reason']})" for s in skipped)
+        out.append(f"**Not compared with the target:** {listed}.")
     return out
 
 
@@ -694,11 +811,12 @@ def render_report(summary: dict[str, Any]) -> str:
         _section_quality(summary),
         _section_statistics(summary),
         _section_findings(findings),
+        _section_target(summary),
         _section_charts(summary),
         _section_next_steps(summary, findings),
         _section_limitations(summary),
     ]
-    return "\n\n".join(p.strip("\n") for p in parts) + "\n"
+    return "\n\n".join(p.strip("\n") for p in parts if p) + "\n"
 
 
 def write_report(summary: dict[str, Any], out_dir: Path) -> Path:
@@ -930,6 +1048,93 @@ def _section_findings(findings: list[dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+def _section_target(s: dict[str, Any]) -> str:
+    target = s.get("analysis", {}).get("target")
+    if not target:
+        return ""
+    name = target["column"]
+    lines = [f"## {TARGET_SECTION}", ""]
+    missing = (f"; {target['rows_missing_target']:,} row(s) without a value are left out"
+               if target["rows_missing_target"] else "")
+    if target["kind"] == "numeric":
+        o = target["overall"]
+        lines.append(f"Target {code(name)} (numeric): {target['rows_used']:,} rows used{missing}. Overall median "
+                     f"{_num(o['median'])} (middle 50%: {_num(o['q1'])} to {_num(o['q3'])}), mean {_num(o['mean'])}.")
+        lines += ["", "Medians, not means: a few large values can move a group's mean a long way. **Strength** "
+                      "is on the same 0–1 scale for every column: for groups, η (eta) on ranks, corrected for "
+                      "the number of groups; for numeric columns, the larger of |Pearson r| and |Spearman ρ|. "
+                      "0 = no difference, 1 = the column fixes the target completely."]
+    else:
+        focus = target["focus_class"]
+        classes = ", ".join(f"{code(c['value'])} {c['count']:,} ({_pct(c['pct'])})" for c in target["classes"])
+        lines.append(f"Target {code(name)} (categorical): {target['rows_used']:,} rows used{missing}. "
+                     f"Classes: {classes}.")
+        lines += ["", ("Rates are the share of each group's rows in a class"
+                       + (f"; with two classes the share of {code(focus)} is shown" if focus else "")
+                       + ". **Strength** (0–1): Cramér's V (bias-corrected) for groups, η on ranks for numeric "
+                         "columns. 0 = no difference, 1 = the column fixes the class completely.")]
+    if target["leakage"]:
+        lines += ["", f"**Possible leakage:** {_codes([e['column'] for e in target['leakage']])} "
+                      f"{'predicts' if len(target['leakage']) == 1 else 'predict'} {code(name)} almost perfectly. "
+                      "See the findings above."]
+
+    ranked = sorted(target["by_group"] + target["by_numeric"], key=lambda e: -(e["strength"] or -1))
+    if ranked:
+        rows = []
+        for e in ranked:
+            kind = "groups" if e in target["by_group"] else "numeric"
+            rows.append([code(e["column"]), kind, _strength(e["strength"]),
+                         e["strength_label"] or "–", _target_summary_cell(target, e)])
+        lines += ["", "### Ranking", "", md_table(["Column", "Compared as", "Strength", "Label", "Summary"], rows)]
+
+    for e in [e for e in target["by_group"] if e["strength"] is not None][:TARGET_DETAIL_COLUMNS]:
+        lines += ["", f"### {code(name)} by {code(e['column'])}", ""]
+        lines.append(_group_table(target, e))
+        if e["other_values"]:
+            lines += ["", f"{e['other_values']:,} rows with rarer values are combined as `Other`."]
+    if target["kind"] == "categorical" and target["by_numeric"]:
+        classes = [c["value"] for c in target["classes"]]
+        rows = [[code(e["column"]), *[_num(c["median"]) for c in e["classes"]],
+                 _strength(e["strength"])] for e in target["by_numeric"]]
+        lines += ["", "### Numeric columns by class (medians)", "",
+                  md_table(["Column", *[f"{_cell(c)}" for c in classes], "Strength (η)"], rows)]
+    small = target["min_group_rows"]
+    lines += ["", f"Groups marked *too small* have fewer than {small} rows: their medians and rates can change "
+                  "a lot with a few rows, so don't rank them."]
+    return "\n".join(lines)
+
+
+def _target_summary_cell(target: dict[str, Any], e: dict[str, Any]) -> str:
+    if e.get("leakage"):
+        return "possible leakage"
+    if e["measure"] == "correlation":
+        if e["strength"] is None:
+            return "–"
+        return f"r = {_num(e['pearson'], 2)}, ρ = {_num(e['spearman'], 2)}, n = {e['n']:,}"
+    hi, lo = e.get("highest"), e.get("lowest")
+    if hi and lo and target["kind"] == "numeric":
+        return f"highest {code(hi['value'])} {_num(hi['median'])}, lowest {code(lo['value'])} {_num(lo['median'])}"
+    if hi and lo:
+        return f"highest {code(hi['value'])} {_pct(hi['rate'])}, lowest {code(lo['value'])} {_pct(lo['rate'])}"
+    if e.get("classes"):
+        return ", ".join(f"{code(c['value'])} {_num(c['median'])}" for c in e["classes"])
+    return "–"
+
+
+def _group_table(target: dict[str, Any], e: dict[str, Any]) -> str:
+    note = lambda g: "too small to compare" if g["small"] else ""  # noqa: E731
+    if target["kind"] == "numeric":
+        return md_table(["Group", "Rows", "Median", "Middle 50%", "Mean", "Note"],
+                        [[code(g["value"]), g["count"], g["median"], f"{_num(g['q1'])} to {_num(g['q3'])}",
+                          g["mean"], note(g)] for g in e["groups"]])
+    classes = [c["value"] for c in target["classes"]]
+    focus = target["focus_class"]
+    shown = [focus] if focus else classes
+    return md_table(["Group", "Rows", *[f"{_cell(c)} %" for c in shown], "Note"],
+                    [[code(g["value"]), g["count"], *[_pct(g["rates"][c]) for c in shown], note(g)]
+                     for g in e["groups"]])
+
+
 def _section_charts(s: dict[str, Any]) -> str:
     charts = s.get("charts", [])
     lines = [f"## {REPORT_SECTIONS[4]}"]
@@ -1020,6 +1225,25 @@ def _chart_text(c: dict[str, Any], s: dict[str, Any]) -> tuple[str, str]:
         if c.get("value_column"):
             text += f" The lower panel shows the median {code(c['value_column'])} per {period}."
         return f"Rows per {period} by {code(c['column'])}", text
+    if kind in ("target_box", "target_rates"):
+        target = analysis.get("target") or {}
+        e = next((x for x in target.get("by_group", []) if x["column"] == c["column"]), {})
+        name, col = c["target"], c["column"]
+        text = f"{_plural(c['groups'], 'group', 'groups')}; strength {_strength(e.get('strength'))} ({e.get('strength_label')})."
+        if e.get("leakage"):
+            text += " The groups barely overlap: possible leakage (see the findings)."
+        else:
+            detail = _target_difference_detail(target, e) if e.get("highest") else ""
+            text += f" {detail}" if detail else ""
+        if kind == "target_box":
+            text += " Sorted by median; gray boxes are groups under " \
+                    f"{target.get('min_group_rows', 30)} rows, Other or missing."
+            if c.get("log_scale"):
+                text += " Log axis, because the target is highly skewed."
+            return f"{code(name)} by {code(col)}", text
+        title = (f"{code(name)} = {code(target['focus_class'])}: rate by {code(col)}" if target.get("focus_class")
+                 else f"{code(name)} by {code(col)}")
+        return title, text
     return kind.replace("_", " ").capitalize(), ""
 
 
@@ -1152,3 +1376,8 @@ def _alt(title: str) -> str:
 def _link(path: str) -> str:
     """Relative link; spaces and parentheses would break Markdown image syntax."""
     return path.replace(" ", "%20").replace("(", "%28").replace(")", "%29")
+
+
+def _strength(x: float | None) -> str:
+    """A 0-1 strength with two decimals, so 0.60 and 1.00 read as measurements."""
+    return "–" if x is None else f"{x:.2f}"

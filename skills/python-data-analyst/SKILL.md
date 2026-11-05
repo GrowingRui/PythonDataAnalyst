@@ -5,7 +5,7 @@ license: MIT
 compatibility: Needs Python 3.11+ with pandas, NumPy, Matplotlib and Seaborn (plus OpenPyXL for Excel, PyArrow for Parquet), and an agent that can run shell commands. Viewing images is optional.
 metadata:
   author: GrowingRui
-  version: "1.3.0"
+  version: "1.4.0"
   repository: https://github.com/GrowingRui/PythonDataAnalyst
 ---
 
@@ -49,6 +49,9 @@ narrower (e.g. "just count the missing values").
   conversation. If it's unclear, ask.
 - Ask what decision or question the analysis should support, unless it's
   already obvious. A goal tells you which findings matter.
+- If the question is about one column ("what goes with higher revenue?",
+  "who churns?", "regional revenue differences"), that column is the
+  **target**: pass it with `--target` in Step 4.
 
 ### Step 2: Check the environment
 - Prefer the project's virtual environment if one exists
@@ -109,6 +112,7 @@ This creates `eda_output/<dataset>_<timestamp>/` containing `report.md`,
 | `--key COLS` | Key columns for the duplicate-key check, e.g. `order_id` |
 | `--date-column COL` | Date column for the time trend (default: the one with the most dates) |
 | `--period P` | `day`, `week`, `month`, `quarter` or `year` for the time trend (default: chosen automatically) |
+| `--target COL` | Centre the analysis on one column: compare it across every group and numeric column (see below) |
 
 Columns that look like row IDs (`order_id`, `customerID`, a 1, 2, 3, ...
 counter, or any numeric column passed with `--key`) are left out of charts
@@ -124,6 +128,30 @@ last periods (`partial_period`) and future or placeholder dates
 under `analysis.time`. If the wrong date column was used (e.g. a load date
 instead of the order date), run again with `--date-column`. A trend
 describes the past: don't present it as a forecast.
+
+With `--target COL` the report gets section **4b. Target comparison**:
+- a **numeric** target (e.g. `revenue`): count, median, quartiles and mean
+  per group of each categorical column (top `--max-categories` groups, the
+  rest as `Other`), and Pearson/Spearman with each numeric column
+- a **categorical** target (e.g. `churned`, at most 8 classes; a 0/1 column
+  counts as two classes): the rate of each class per group, and the median
+  of each numeric column per class
+
+Every column gets a 0–1 strength (η on ranks for groups, Cramér's V between
+categories, |r| or |ρ| between numbers), ranked, with box plots or rate
+charts for the 3 strongest group columns. Findings: `target_difference`
+(strength ≥ 0.3) and `possible_leakage` (a column that predicts the target
+almost perfectly: derived from it or recorded after the outcome). Groups
+under 30 rows are marked *too small to compare*; rows without a target value
+are counted and left out. Details are in `summary.json` under
+`analysis.target`. When you write about it:
+- Say "differs by", never "is caused by" or "drives": no significance tests
+  were run, and another column can produce the difference (Simpson's
+  paradox; the report suggests a within-group check).
+- Treat leaky columns as unusable for explaining the target until the user
+  confirms how they are made.
+- A target with numbers stored as text is refused with an explanation:
+  propose converting it in a cleaned copy (Step 6) first.
 
 `report.md` is complete without you: overview, quality, statistics,
 rule-based findings, a short text per chart, cleaning options with their
@@ -158,6 +186,7 @@ script reports that the file changed during the run, tell the user.
 2. **Data quality assessment**: missing values, duplicates, type problems, outliers
 3. **Descriptive statistics**: numeric and categorical summaries
 4. **Key findings**: ranked, factual, with numbers, then your analyst interpretation
+   - **4b. Target comparison**: only with `--target`
 5. **Visualization summaries**: one or two sentences per chart: what it shows
 6. **Suggested next steps**: cleaning options (with consequences) and further analysis
 7. **Limitations**: the methods used and what they can't tell you
@@ -178,6 +207,8 @@ Load these only when you need them:
 - "Check `customers.xlsx` (sheet `2025`) for data quality problems."
 - "Which numeric columns in `survey.csv` have outliers, and should I remove them?"
 - "/python-data-analyst data/sales.csv focus on regional revenue differences"
+  (run with `--target revenue`)
+- "Which customers in `crm.xlsx` churn more often?" (`--target churned`)
 
 ## Example of a good finding
 

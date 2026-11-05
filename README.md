@@ -49,13 +49,18 @@ support skills, such as OpenAI Codex, Gemini CLI, GitHub Copilot or Cursor.
   categories.
 - **Finds relationships:** Pearson and Spearman correlations, with a warning
   when they disagree.
+- **Compares groups against one target** (`--target revenue`, `--target
+  churned`): medians or class rates per group, every column ranked by one
+  0–1 strength, groups too small to compare marked, and columns that
+  predict the target suspiciously well flagged as possible leakage.
 - **Follows dates over time:** rows per day, week, month, quarter or year
   (chosen automatically), with gaps that are unlikely to be chance, spikes,
   incomplete first and last periods, and future or placeholder dates
   (`1900-01-01`). Dates stored as text are parsed in memory only.
 - **Draws charts:** histograms with box plots, log-scale histograms for skewed
   data, top categories, a missing-values chart, a time trend, a correlation
-  heatmap and scatter plots of the strongest pairs. They use one consistent,
+  heatmap, scatter plots of the strongest pairs, and box plots or rate charts
+  per group for a target. They use one consistent,
   colourblind-checked palette.
 - **Writes a report:** `report.md` with ranked findings, cleaning options and
   what each one costs, suggested next steps and limitations. `summary.json`
@@ -188,6 +193,7 @@ python skills/python-data-analyst/scripts/generate_eda.py data/sales.csv        
 | `--max-charts N` | EDA | Cap on the number of charts (default 40) |
 | `--date-column COL` | EDA | Date column for the time trend (default: the one with the most dates) |
 | `--period P` | EDA | `day`, `week`, `month`, `quarter` or `year` for the time trend (default: about 12–120 points) |
+| `--target COL` | EDA | Compare one column across all the others (adds report section 4b) |
 
 ## What you get
 
@@ -211,6 +217,8 @@ eda_output/sales_20261105-092532/
 5. **Visualization summaries**: one or two sentences per chart, with the chart
 6. **Suggested next steps**: cleaning options with their costs, further analysis
 7. **Limitations**: what the methods used can't tell you
+
+With `--target`, a section **4b. Target comparison** follows the key findings.
 
 An excerpt of the findings for the sample data:
 
@@ -238,6 +246,10 @@ python skills/python-data-analyst/scripts/generate_eda.py sample_data/sample_sal
 Or ask your agent: *"What's wrong with the data in
 sample_data/sample_sales.csv?"*
 
+To see the target comparison, add `--target revenue`: `category` comes out
+far ahead of `region`, `channel` makes no difference, and `order_size` is
+flagged as possible leakage (it's a band computed from revenue itself).
+
 ## How it works
 
 ```text
@@ -247,6 +259,7 @@ skills/python-data-analyst/     # the whole skill: this folder is what gets inst
 │   ├── inspect_data.py         # loading, column types, statistics, quality checks
 │   ├── generate_eda.py         # correlations, categories, charts; writes the output folder
 │   ├── time_trends.py          # rows per period, gaps, spikes, implausible dates
+│   ├── target_analysis.py      # --target: groups, strengths, leakage
 │   └── report.py               # rule-based findings and report.md
 └── references/                 # loaded only when needed
     ├── pandas-guide.md         # reading tricky files, groupby, memory, pandas pitfalls
@@ -281,6 +294,7 @@ The design follows a few rules:
 | Placeholder detection | A fixed list (`-`, `?`, `n/a`, `unknown`, ...) and numeric codes like `999` that are outliers | Codes inside the normal range (`0` meaning "no answer") |
 | Parquet's stored types | Typed columns can't hold numbers or dates as text, so fewer type problems are found | That the values are right: the report says why type problems are absent |
 | JSON flattening | Nested objects become `parent.child` columns; lists are counted and reported | The items inside lists: they aren't analysed or charted |
+| Target comparison (`--target`) | How the target differs across groups (η on ranks, Cramér's V) and numeric columns; columns that predict it almost perfectly | Why: no significance tests, and another column can create a difference (Simpson's paradox). Groups under 30 rows aren't compared |
 | Time trend (rows per period) | When rows are missing, bunched up or misdated, for one date column | Forecasts; seasonality from less than two years of data. Gaps and spikes assume rows arrive at a steady random rate |
 
 Correlations are computed between numeric columns only, and none of them

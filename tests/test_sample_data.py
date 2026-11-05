@@ -56,7 +56,7 @@ def test_committed_sample_matches_the_generator(generator, tmp_path):
 def test_shape(sample_run):
     _, _, summary, _ = sample_run
     assert summary["overview"]["rows"] == 1215  # 1,200 orders + 12 exact duplicates + 3 edited repeats
-    assert summary["overview"]["columns"] == 16
+    assert summary["overview"]["columns"] == 17
 
 
 @pytest.mark.parametrize(
@@ -137,3 +137,40 @@ def test_report_and_input_untouched(sample_run):
     report = (out / "report.md").read_text(encoding="utf-8")
     assert "categories_order_date" not in report  # no "most common dates" chart
     assert "Only 64.9% of rows are complete, not counting the empty column `legacy_code`" in report
+
+
+@pytest.fixture(scope="module")
+def target_run(generator, tmp_path_factory):
+    tmp = tmp_path_factory.mktemp("target")
+    path = generator.write_csv(generator.make_sales(), tmp / "sample_sales.csv")
+    return run_eda(load_dataset(path), tmp / "out", key_columns=["order_id"], target="revenue")
+
+
+def test_target_revenue_ranks_the_planted_differences(target_run):
+    t = target_run["analysis"]["target"]
+    groups = {e["column"]: e for e in t["by_group"]}
+    ranked = [e["column"] for e in t["by_group"] if not e.get("leakage")]
+    # category (prices 12 to 120) far ahead of region (x0.7 to x1.5); channel and returning customers: nothing
+    assert ranked[:2] == ["category", "region"]
+    assert groups["category"]["strength"] > 2 * groups["region"]["strength"]
+    for none in ("channel", "returning_customer"):
+        assert groups[none]["strength_label"] == "negligible", none
+    assert (groups["category"]["highest"]["value"], groups["category"]["lowest"]["value"]) == ("Electronics", "Books")
+    assert (groups["region"]["highest"]["value"], groups["region"]["lowest"]["value"]) == ("West", "East")
+    order = [g["value"] for g in groups["region"]["groups"] if not g["small"]]
+    assert order == ["West", "North", "South", "East"]
+    # The inconsistent labels show up as their own, too-small groups.
+    assert {g["value"] for g in groups["region"]["groups"] if g["small"]} == {"north", "South "}
+
+
+def test_target_revenue_flags_the_planted_leak(target_run):
+    t = target_run["analysis"]["target"]
+    assert [(e["column"], e["measure"]) for e in t["leakage"]] == [("order_size", "separation")]
+    leak = [f for f in target_run["findings"] if f["rule"] == "possible_leakage"]
+    assert [f["columns"] for f in leak] == [["order_size", "revenue"]]
+    assert target_run["findings"][0]["rule"] == "possible_leakage"
+    # Columns that can't be compared yet are listed with the reason.
+    skipped = {s["column"]: s["reason"] for s in t["skipped"]}
+    assert skipped["shipping_cost"] == skipped["rating"] == "holds numbers stored as text"
+    assert skipped["customer_id"] == "an ID column"
+    assert target_run["analysis"]["time"]["trend"]["value_column"] == "revenue"

@@ -34,6 +34,14 @@ Planted problems (the answer key; the EDA should find every one of them)
 - quantity, revenue a few wholesale orders (quantity 150-300): real but extreme
 - unit_price, revenue  highly right-skewed, as prices and order values usually are
 - revenue           strongly correlated with unit_price (it is computed from it)
+- (for --target revenue) real group differences, to be ranked in this order:
+                    category (median unit prices from 12 to 120) far ahead of
+                    region (prices x1.5 in the West, x1.1 North, x0.9 South,
+                    x0.7 East); channel and returning_customer make no
+                    difference
+- order_size        target leakage: "small" / "medium" / "large" computed from
+                    revenue itself (under 50, 50 to 250, 250 and more), so it
+                    "predicts" revenue perfectly
 - (rows)            12 exact duplicate rows, and 3 order_ids that appear twice
                     with a different quantity (run the EDA with --key order_id)
 """
@@ -62,6 +70,8 @@ CATEGORIES = {  # median unit price
 GAP_START, GAP_END = "2025-08-04", "2025-08-31"  # Monday to Sunday: four full weeks
 LOAD_DATE = "2025-09-15"
 REGIONS = {"North": 0.30, "South": 0.25, "East": 0.20, "West": 0.25}
+REGION_PRICE = {"North": 1.1, "South": 0.9, "East": 0.7, "West": 1.5}  # a real regional difference
+ORDER_SIZE_BINS = (50, 250)  # revenue limits for "small" / "medium" / "large"
 CHANNELS = {"Online": 0.55, "Store": 0.30, "Phone": 0.15}
 
 DEFAULT_OUTPUT = Path(__file__).resolve().parent / "sample_sales.csv"
@@ -86,7 +96,8 @@ def make_sales(seed: int = SEED, n: int = N_ORDERS) -> pd.DataFrame:
 
     quantity = np.minimum(rng.geometric(0.45, size=n), 10)
     medians = np.array([CATEGORIES[c] for c in category])
-    unit_price = np.round(medians * rng.lognormal(0, 0.6, size=n), 2)
+    regional = np.array([REGION_PRICE[r] for r in region])
+    unit_price = np.round(medians * rng.lognormal(0, 0.6, size=n) * regional, 2)
 
     discount = rng.choice([0, 5, 10, 15, 20], size=n, p=[0.45, 0.2, 0.2, 0.1, 0.05]).astype(float)
     is_store = channel == "Store"
@@ -113,6 +124,7 @@ def make_sales(seed: int = SEED, n: int = N_ORDERS) -> pd.DataFrame:
             "unit_price": unit_price,
             "discount_pct": discount,
             "revenue": 0.0,  # filled in after the planted problems below
+            "order_size": "",  # derived from revenue: the planted leak
             "shipping_cost": shipping_text,
             "delivery_days": delivery,
             "rating": rating,
@@ -137,6 +149,7 @@ def make_sales(seed: int = SEED, n: int = N_ORDERS) -> pd.DataFrame:
     df.loc[rng.choice(online, 5, replace=False), "shipping_cost"] = "free"
 
     df["revenue"] = np.round(df["quantity"] * df["unit_price"] * (1 - df["discount_pct"].fillna(0) / 100), 2)
+    df["order_size"] = order_size(df["revenue"])
     df["order_date"] = _plant_date_problems(dates, seed)
 
     # Exact duplicates (e.g. an export that ran twice) and repeated keys with
@@ -147,8 +160,15 @@ def make_sales(seed: int = SEED, n: int = N_ORDERS) -> pd.DataFrame:
     edited["revenue"] = np.round(
         edited["quantity"] * edited["unit_price"] * (1 - edited["discount_pct"].fillna(0) / 100), 2
     )
+    edited["order_size"] = order_size(edited["revenue"])
     df = pd.concat([df, exact, edited])
     return df.sort_values("order_id", kind="stable").reset_index(drop=True)
+
+
+def order_size(revenue: pd.Series) -> np.ndarray:
+    """The leaky band: a label computed from the target itself."""
+    low, high = ORDER_SIZE_BINS
+    return np.where(revenue < low, "small", np.where(revenue < high, "medium", "large"))
 
 
 def _plant_date_problems(dates: pd.DatetimeIndex, seed: int) -> np.ndarray:

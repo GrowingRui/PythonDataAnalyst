@@ -329,7 +329,8 @@ legitimate values. That's a limitation of the method, not a data problem.
 
 ## 7. Skewed, constant and nearly constant columns
 
-Finding rules: `skewed`, `constant_column`, `dominant_category`.
+Finding rules: `skewed`, `constant_column`, `dominant_category`,
+`near_duplicate_columns`, `possible_leakage`.
 
 **Skewed columns** don't need cleaning. They need the right summary: median
 and IQR instead of mean and standard deviation. For charts, a log scale; for
@@ -353,6 +354,17 @@ for the rare groups rest on very few rows.
 are usually one column derived from another (a total and its parts, the same
 measure in two units). Not a data error; keep both in the file, but use only
 one in a model.
+
+**Possible target leakage** (finding rule `possible_leakage`, only with
+`--target`): a column that predicts the target almost perfectly. Usually it's
+computed from the target (an order-size band from revenue, revenue in another
+currency) or filled in after the outcome (a cancellation reason for a churn
+target). Nothing in the file is wrong, so there is nothing to clean; the
+column just can't *explain* the target. Ask how and when it's recorded:
+
+| Finding | Options | Cost |
+|---|---|---|
+| `possible_leakage` | Leave the column out when explaining or predicting the target; keep it in the file | If it's a genuine, known-in-advance predictor, you lose real information. Keeping a leaky one makes every comparison and model look far better than it will be on new data |
 
 ## 8. Dates over time
 

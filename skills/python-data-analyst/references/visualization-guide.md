@@ -24,6 +24,7 @@ where they differ.
 | How is one numeric column distributed? | Histogram + box plot (the script does this) | A bar per raw value |
 | Is it skewed over orders of magnitude? | Histogram on a log axis (the script adds it) | Cutting off the tail |
 | How does a numeric column differ between groups? | Box plots per group, sorted by median | Bars of the mean alone (hide spread and n) |
+| How does a yes/no rate differ between groups? | Horizontal bars of the rate, sorted, with the overall rate as a line and n per bar | Counts instead of rates (big groups always win) |
 | Which group is largest? | Horizontal bar chart, sorted | Pie chart with more than 3–4 slices |
 | How does something change over time? | Line chart, time on the x-axis | Bars for long series; unsorted dates |
 | How do two numeric columns relate? | Scatter plot (sample if > 5,000 points) | A line through unsorted points |
