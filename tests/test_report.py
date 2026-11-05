@@ -147,6 +147,45 @@ def test_correlation_strength_thresholds(tmp_path):
     assert "not evidence that one causes" in pairs[("x", "strong")]["detail"]
 
 
+def test_correlation_title_says_when_only_ranks_agree(tmp_path):
+    # y = e^x: perfectly monotonic (Spearman 1) but far from a straight line.
+    x = np.linspace(0.5, 20, 60)
+    findings = run_eda(pd.DataFrame({"x": x, "y": np.exp(x)}), tmp_path / "out")["findings"]
+    title = _by_rule(findings, "strong_correlation")[0]["title"]
+    assert "by rank, much less linearly" in title
+
+
+def test_code_values_get_their_own_finding(tmp_path):
+    df = pd.DataFrame({"days": [1.0, 2, 3, 4, 5, 6, 7] * 10 + [999] * 3})
+    findings = run_eda(df, tmp_path / "out")["findings"]
+    code_finding = _by_rule(findings, "possible_missing_code")[0]
+    assert code_finding["severity"] == "medium" and "999" in code_finding["title"]
+    outliers = _by_rule(findings, "outliers")[0]
+    assert "probably legitimate" not in outliers["detail"]  # codes aren't "expected" skew
+
+
+def test_incomplete_rows_ignore_the_empty_column(tmp_path):
+    n = 40
+    df = pd.DataFrame(
+        {
+            "a": [np.nan if i % 4 == 0 else float(i) for i in range(n)],  # 25% missing
+            "b": [np.nan if i % 4 == 1 else float(i) for i in range(n)],  # another 25%
+            "empty": [np.nan] * n,
+        }
+    )
+    findings = run_eda(df, tmp_path / "out")["findings"]
+    title = _by_rule(findings, "incomplete_rows")[0]["title"]
+    assert title == "Only 50.0% of rows are complete, not counting the empty column `empty`"
+
+
+def test_no_category_chart_for_dates_stored_as_text(tmp_path):
+    dates = pd.date_range("2025-01-01", periods=30).strftime("%d/%m/%Y")
+    df = pd.DataFrame({"when": list(dates) * 2, "team": ["a", "b", "c"] * 20})
+    summary = run_eda(df, tmp_path / "out")
+    charted = {c.get("column") for c in summary["charts"] if c["type"] == "top_categories"}
+    assert charted == {"team"}
+
+
 def test_key_columns_count_as_ids_even_when_repeated(tmp_path):
     rng = np.random.default_rng(14)
     df = pd.DataFrame({"order_id": list(range(1, 51)) + [1, 2], "v": rng.uniform(0, 1, 52),

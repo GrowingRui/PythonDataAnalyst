@@ -393,7 +393,11 @@ def chart_missing(missing: dict[str, Any], path: Path) -> dict[str, Any] | None:
     for y, c in enumerate(cols):
         ax.text(c["missing_pct"], y, f"  {c['missing_pct']:.1f}% ({c['missing']:,})", va="center",
                 fontsize=9, color=COLOR_INK_2)
-    ax.set_xlim(0, max(100, max(pcts) * 1.25) if max(pcts) > 80 else min(100, max(pcts) * 1.35))
+    if max(pcts) > 80:
+        ax.set_xlim(0, 125)  # room for the label next to a 100% bar...
+        ax.set_xticks(range(0, 101, 20))  # ...but no ticks beyond 100%, which can't exist
+    else:
+        ax.set_xlim(0, min(100, max(pcts) * 1.35))
     ax.xaxis.set_major_formatter(FuncFormatter(lambda x, _p: f"{x:g}%"))
     ax.grid(axis="y", visible=False)
     n_rows = missing["total_cells"] // max(len(missing["columns"]), 1)
@@ -547,7 +551,9 @@ def run_eda(
             plan.append(("numeric", c))
             if needs_log_view(df[c]):
                 plan.append(("numeric_log", c))
-    plan += [("categories", c) for c in cats]
+    # Dates stored as text look categorical, but "most common dates" says nothing.
+    text_dates = {i["column"] for i in summary["quality"]["type_issues"] if i["issue"] == "dates_as_text"}
+    plan += [("categories", c) for c in cats if c not in text_dates]
 
     charts: list[dict[str, Any]] = []
     skipped: list[str] = []

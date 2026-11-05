@@ -72,6 +72,13 @@ CLEANING_ADVICE: dict[str, tuple[str, str, str]] = {
         "The missing counts go up and the column may become numeric. First check that the placeholder never "
         "means something real (\"unknown\" can be a valid survey answer).",
     ),
+    "possible_missing_code": (
+        "Code values such as 999",
+        "Confirm with the data owner what the code means, then turn it into a missing value "
+        "(`df[col].mask(df[col] == 999)`).",
+        "If the code is a real value after all, you remove genuine extremes. Left in, it inflates the "
+        "mean, the spread and the skew.",
+    ),
     "duplicate_rows": (
         "Exact duplicate rows",
         "Remove them with `drop_duplicates()`, keeping the first copy.",
@@ -189,12 +196,16 @@ def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
 
     m = q["missing"]
     gappy = [c for c in miss_cols if c["missing"] and c["name"] not in empty]
-    if len(gappy) >= 2 and m["rows_with_missing_pct"] >= INCOMPLETE_ROWS_PCT:
+    # Count without the all-empty columns: they'd make every row incomplete.
+    gap_rows = m.get("rows_with_missing_ignoring_empty_columns", m["rows_with_missing"])
+    gap_pct = m.get("rows_with_missing_ignoring_empty_columns_pct", m["rows_with_missing_pct"])
+    if len(gappy) >= 2 and gap_pct >= INCOMPLETE_ROWS_PCT:
+        ignoring = f", not counting the empty column{'s' if len(empty) > 1 else ''} {_codes(empty)}" if empty else ""
         add("incomplete_rows", "medium", [c["name"] for c in gappy],
-            f"Only {_pct(100 - m['rows_with_missing_pct'])} of rows are complete",
-            f"{m['rows_with_missing']:,} rows ({_pct(m['rows_with_missing_pct'])}) have at least one gap "
-            f"(empty columns not counted separately). Dropping every incomplete row (`dropna()`) would leave "
-            f"{m['complete_rows']:,} of {rows:,} rows.", m["rows_with_missing_pct"])
+            f"Only {_pct(100 - gap_pct)} of rows are complete{ignoring}",
+            f"{gap_rows:,} rows ({_pct(gap_pct)}) have a gap in at least one of {_codes([c['name'] for c in gappy])}. "
+            f"Dropping those rows (`dropna(subset=[...])`) would leave {rows - gap_rows:,} of {rows:,} rows.",
+            gap_pct)
 
     for c in miss_cols:
         if c["disguised"]:
@@ -252,14 +263,28 @@ def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
         if s.get("kind") != "numeric" or name in ids or not (s.get("skew_label") or "").startswith("highly"):
             continue
         skewed.add(name)
+        detail = _skew_detail(s)
+        codes = q["outliers"].get(name, {}).get("code_like_values")
+        if codes:
+            detail += (f" Part of the skew may come from the code value{'s' if len(codes) > 1 else ''} "
+                       f"{', '.join(codes)}; check again once {'they are' if len(codes) > 1 else 'it is'} resolved.")
         add("skewed", "medium", [name],
-            f"{code(name)} is {s['skew_label']} (skewness {_num(s['skewness'], 2)})", _skew_detail(s),
+            f"{code(name)} is {s['skew_label']} (skewness {_num(s['skewness'], 2)})", detail,
             abs(s["skewness"]))
 
     for name, o in q["outliers"].items():
         if name in ids or o.get("status") != "ok" or not o["n_outliers"]:
             continue
-        expected = name in skewed
+        codes = o.get("code_like_values") or {}
+        if codes:
+            listed = ", ".join(f"{code(v)} ×{c}" for v, c in codes.items())
+            add("possible_missing_code", "medium", [name],
+                f"{code(name)} contains {', '.join(codes)}, a number often used to mean \"unknown\"",
+                f"{listed}, far outside the IQR fences ({_num(o['lower_fence'])} to {_num(o['upper_fence'])}). "
+                "Exports often use such codes for missing or not-applicable values; the skill can't tell them "
+                "apart from real numbers. If it is a code, it distorts the mean, spread and skew.",
+                sum(codes.values()))
+        expected = name in skewed and not codes
         severity = "medium" if o["outlier_pct"] >= OUTLIER_MEDIUM_PCT and not expected else "low"
         parts = [f"Fences {_num(o['lower_fence'])} to {_num(o['upper_fence'])} "
                  f"({o['n_low']:,} below, {o['n_high']:,} above)."]
@@ -289,9 +314,15 @@ def build_findings(summary: dict[str, Any]) -> list[dict[str, Any]]:
         for note in p.get("notes", []):
             detail += f" {_sentence(note)}"
         detail += " This is an association, not evidence that one causes the other."
+        r, rho = abs(p["pearson"] or 0), abs(p["spearman"] or 0)
+        how = ""
+        if rho - r >= 0.2:
+            how = " by rank, much less linearly"  # Spearman sees it, Pearson doesn't
+        elif r - rho >= 0.2:
+            how = " linearly, much less by rank"  # Pearson driven by a few extreme points
         add("near_duplicate_columns" if redundant else "strong_correlation",
             "medium" if strength >= CORR_MEDIUM else "low", [p["a"], p["b"]],
-            f"{code(p['a'])} and {code(p['b'])} are {p['strength']}ly {p['direction']}ly correlated "
+            f"{code(p['a'])} and {code(p['b'])} are {p['strength']}ly {p['direction']}ly correlated{how} "
             f"(Pearson r = {_num(p['pearson'], 2)}, Spearman ρ = {_num(p['spearman'], 2)}, n = {p['n']:,})",
             detail, strength)
     if len(pairs) > CORR_FINDINGS_MAX:
@@ -460,7 +491,8 @@ def limitations(summary: dict[str, Any]) -> list[str]:
         "**Column types are detected by rules** (for example, text with mostly unique values counts as "
         "free text). Check the overview table if a column was classified unexpectedly.",
         "**Disguised missing values** are matched against a fixed list of placeholders (`-`, `?`, "
-        "`unknown`, `n/a`, ...). Codes such as `0` or `999` meaning \"no answer\" are not detected.",
+        "`unknown`, `n/a`, ...). Numeric codes such as `999` are only reported when they are also outliers; "
+        "a code inside the normal range (`0` for \"no answer\") can't be told apart from a real value.",
     ]
     if analysis.get("excluded_id_columns"):
         out.append(f"**ID columns excluded** from charts and correlations: "
@@ -565,6 +597,9 @@ def _section_quality(s: dict[str, Any]) -> str:
     lines.append(f"{m['total_missing']:,} of {m['total_cells']:,} cells are empty ({_pct(m['total_missing_pct'])}). "
                  f"{m['rows_with_missing']:,} rows ({_pct(m['rows_with_missing_pct'])}) have at least one gap; "
                  f"{m['complete_rows']:,} are complete.")
+    complete_used = m.get("complete_rows_ignoring_empty_columns")
+    if complete_used is not None and complete_used != m["complete_rows"]:
+        lines.append(f"Ignoring the completely empty column(s), {complete_used:,} rows are complete.")
     if m.get("total_disguised"):
         lines.append(f"Another {m['total_disguised']:,} values are placeholders such as `-` or `unknown` that "
                      "probably mean missing.")

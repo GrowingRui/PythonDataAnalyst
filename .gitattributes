@@ -1,0 +1,2 @@
+# Keep CSV files byte-identical on every OS (sample data is regenerated and compared)
+*.csv text eol=lf

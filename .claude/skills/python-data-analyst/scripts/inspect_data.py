@@ -57,6 +57,9 @@ IQR_MIN_VALUES = 5
 IQR_SMALL_SAMPLE = 20
 # Date detection parses each distinct value; above this many it uses a sample.
 DATE_SAMPLE_UNIQUE = 5000
+# Numbers often used to mean "unknown" or "not applicable" in exports. Reported
+# only when they are also IQR outliers, so a real 99 in a 0-100 score is left alone.
+CODE_LIKE_VALUES = (99, 999, 9999, 99999, -1, -9, -99, -999, -9999)
 
 
 class DatasetError(ValueError):
@@ -383,6 +386,10 @@ def missing_values(df: pd.DataFrame, extra_tokens: Iterable[str] = ()) -> dict[s
         )
     total_cells = int(df.size)
     total_missing = int(df.isna().sum().sum())
+    # One all-empty column makes every row "incomplete", which hides how
+    # complete the rest of the data is. So also count rows ignoring such columns.
+    used = df.loc[:, df.notna().any()]
+    gaps_in_used = int(used.isna().any(axis=1).sum()) if used.shape[1] else 0
     return {
         "total_cells": total_cells,
         "total_missing": total_missing,
@@ -391,6 +398,9 @@ def missing_values(df: pd.DataFrame, extra_tokens: Iterable[str] = ()) -> dict[s
         "rows_with_missing": int(df.isna().any(axis=1).sum()),
         "rows_with_missing_pct": _pct(int(df.isna().any(axis=1).sum()), n_rows),
         "complete_rows": int(df.notna().all(axis=1).sum()),
+        "rows_with_missing_ignoring_empty_columns": gaps_in_used,
+        "rows_with_missing_ignoring_empty_columns_pct": _pct(gaps_in_used, n_rows),
+        "complete_rows_ignoring_empty_columns": n_rows - gaps_in_used,
         "columns": columns,
     }
 
@@ -516,6 +526,15 @@ def iqr_outliers(df: pd.DataFrame, kinds: dict[str, str] | None = None, k: float
             "n_outliers": int(low.size + high.size), "outlier_pct": _pct(low.size + high.size, n),
             "lowest_outliers": sorted(low.tolist())[:5], "highest_outliers": sorted(high.tolist())[-5:][::-1],
         }
+        codes = {}
+        for code in CODE_LIKE_VALUES:
+            # Negative codes only count in columns that are otherwise non-negative.
+            if (code > 0 and code > upper) or (code < 0 and code < lower and q1 >= 0):
+                hits = int((v == code).sum())
+                if hits:
+                    codes[str(code)] = hits
+        if codes:
+            entry["code_like_values"] = codes
         if n < IQR_SMALL_SAMPLE:
             entry["note"] = f"small sample ({n} values): quartiles are unstable, treat flags as tentative"
         result[key] = entry
@@ -832,6 +851,8 @@ def _format_quality(q: dict[str, Any]) -> list[str]:
         f"Missing: {m['total_missing']:,} of {m['total_cells']:,} cells ({m['total_missing_pct']}%); "
         f"{m['rows_with_missing']:,} rows ({m['rows_with_missing_pct']}%) have at least one gap"
     )
+    if m["complete_rows_ignoring_empty_columns"] != m["complete_rows"]:
+        out.append(f"  ignoring all-empty columns: {m['complete_rows_ignoring_empty_columns']:,} complete rows")
     rows = [[c["name"], c["missing"], c["missing_pct"], c["disguised"],
              ", ".join(f"{k} x{v}" for k, v in c["disguised_values"].items()) or "-"]
             for c in m["columns"] if c["missing"] or c["disguised"]]
@@ -865,6 +886,9 @@ def _format_quality(q: dict[str, Any]) -> list[str]:
                 f"fences {_fmt(o['lower_fence'])} .. {_fmt(o['upper_fence'])}")
         if o["highest_outliers"]:
             line += f"; highest {', '.join(_fmt(v) for v in o['highest_outliers'])}"
+        if o.get("code_like_values"):
+            codes = ", ".join(f"{v} x{c}" for v, c in o["code_like_values"].items())
+            line += f"; possible code for unknown: {codes}"
         if o.get("note"):
             line += f" ({o['note']})"
         out.append(line)

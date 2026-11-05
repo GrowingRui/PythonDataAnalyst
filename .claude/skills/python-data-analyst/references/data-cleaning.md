@@ -116,9 +116,18 @@ changed = int(is_placeholder.sum())
 # Or at load time: pd.read_csv(path, na_values=placeholders)
 ```
 
-The skill detects only a fixed list of placeholders. Ask about codes such as
-`0`, `-1`, `99` or `999` in columns where they can't be real values (an age
-of 999, a price of -1).
+The skill detects only a fixed list of text placeholders.
+
+**Numeric codes** (finding rule `possible_missing_code`). Exports often write
+`999`, `-1` or `9999` for "unknown". They look like numbers, so they inflate
+the mean, the spread and the skew. The skill reports them when they are also
+IQR outliers (a delivery time of 999 days). Codes inside the normal range
+(`0` for "no answer" in a 0–10 score) can't be detected: ask about them.
+
+```python
+codes = clean["quantity"].isin([999, -1]).sum()  # how many rows use the code
+clean["quantity"] = clean["quantity"].mask(clean["quantity"].isin([999, -1]))  # code -> missing, once confirmed
+```
 
 ## 4. Duplicates
 

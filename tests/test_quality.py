@@ -270,6 +270,33 @@ def test_iqr_only_numeric_columns(mixed_df):
     assert set(iqr_outliers(mixed_df)) == {"id", "price"}
 
 
+def test_code_like_values_among_outliers():
+    days = pd.DataFrame({"days": [1.0, 2, 3, 4, 5, 6, 7] * 5 + [999, 999]})
+    assert iqr_outliers(days)["days"]["code_like_values"] == {"999": 2}
+
+
+def test_code_like_values_only_when_outside_the_fences():
+    # 99 is an ordinary value in a 0-100 score: not an outlier, so not a code.
+    scores = pd.DataFrame({"score": list(range(50, 100))})
+    assert "code_like_values" not in iqr_outliers(scores)["score"]
+
+
+def test_negative_code_only_in_non_negative_columns():
+    positive = pd.DataFrame({"x": [10.0, 11, 12, 13, 14] * 6 + [-1]})
+    assert iqr_outliers(positive)["x"]["code_like_values"] == {"-1": 1}
+    # In a column that is mostly negative anyway, -1 is just a value.
+    signed = pd.DataFrame({"x": [-50.0, -40, -45, -42, -48] * 6 + [-1]})
+    assert "code_like_values" not in iqr_outliers(signed)["x"]
+
+
+def test_complete_rows_ignore_empty_columns():
+    df = pd.DataFrame({"a": [1.0, np.nan, 3, 4], "b": [1, 2, 3, 4], "empty": [np.nan] * 4})
+    m = missing_values(df)
+    assert m["complete_rows"] == 0  # the empty column makes every row incomplete
+    assert m["complete_rows_ignoring_empty_columns"] == 3
+    assert m["rows_with_missing_ignoring_empty_columns_pct"] == 25.0
+
+
 # --------------------------------------------------------------------------
 # Whole pipeline and CLI
 # --------------------------------------------------------------------------
