@@ -49,3 +49,22 @@ jobs:
           "seaborn==0.13.0" "openpyxl==3.1.0" "pytest==8.0.*"
       - name: Run tests
         run: python -m pytest
+
+  skill-format:
+    # The official validators: the open Agent Skills format, and the Claude Code plugin.
+    name: Skill and plugin format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Validate SKILL.md against the Agent Skills spec
+        run: |
+          python -m pip install "skills-ref==0.1.1"
+          agentskills validate skills/python-data-analyst
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Validate the Claude Code plugin and marketplace
+        run: npx --yes @anthropic-ai/claude-code@2.1.318 plugin validate .

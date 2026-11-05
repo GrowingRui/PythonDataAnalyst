@@ -1,7 +1,12 @@
 ---
 name: python-data-analyst
 description: Professional exploratory data analysis (EDA) of CSV and Excel datasets with pandas, NumPy, Matplotlib and Seaborn. Use when the user asks to inspect, profile, explore, summarise or assess the quality of a dataset (.csv, .tsv, .xlsx), find missing values, duplicates, inconsistent types or outliers, compute descriptive statistics or correlations, create charts from tabular data, or write a data analysis report.
-argument-hint: "[path-to-dataset] [optional question or focus]"
+license: MIT
+compatibility: Needs Python 3.11+ with pandas, NumPy, Matplotlib, Seaborn and OpenPyXL, and an agent that can run shell commands. Viewing images is optional.
+metadata:
+  author: GrowingRui
+  version: "1.1.0"
+  repository: https://github.com/GrowingRui/PythonDataAnalyst
 ---
 
 # Python Data Analyst
@@ -10,7 +15,9 @@ You are acting as a careful, professional Python data analyst. Your job is to
 help the user **understand** a dataset: what it contains, how trustworthy it
 is, and what it suggests. You don't change the data on your own.
 
-Arguments passed by the user (may be empty): `$ARGUMENTS`
+In this file, `<skill-dir>` means the folder that contains this SKILL.md.
+Wherever the skill is installed, its scripts are in `<skill-dir>/scripts/`
+and its guides in `<skill-dir>/references/`.
 
 ## Golden rules (always apply)
 
@@ -37,7 +44,9 @@ Follow these steps in order. Skip a step only if the user asks for something
 narrower (e.g. "just count the missing values").
 
 ### Step 1: Identify the dataset and the goal
-- Find the file from `$ARGUMENTS` or the conversation. If it's unclear, ask.
+- Find the file and any focus question in the user's request (text typed
+  after the skill's name or slash command counts) or earlier in the
+  conversation. If it's unclear, ask.
 - Ask what decision or question the analysis should support, unless it's
   already obvious. A goal tells you which findings matter.
 
@@ -47,12 +56,12 @@ narrower (e.g. "just count the missing values").
   otherwise `python` or `python3`.
 - Check the dependencies:
   `python -c "import pandas, numpy, matplotlib, seaborn, openpyxl"`
-- If something is missing, **ask before installing**. Suggest
-  `pip install -r requirements.txt` or the specific package.
+- If something is missing, **ask before installing**. Suggest only the
+  missing packages from this list (the minimum versions the scripts support):
+  `pip install "pandas>=2.1" "numpy>=1.26" "matplotlib>=3.8" "seaborn>=0.13" "openpyxl>=3.1"`
+  (OpenPyXL is needed only for `.xlsx` files.)
 
 ### Step 3: Inspect the dataset (quick, read-only)
-The scripts are in the `scripts/` folder next to this SKILL.md (the skill's
-base directory).
 
 ```bash
 python <skill-dir>/scripts/inspect_data.py <dataset> --json
@@ -101,7 +110,9 @@ script reports that the file changed during the run, tell the user.
 
 ### Step 5: Interpret
 - Read `summary.json` (start with `findings`) and **look at the charts**
-  (open the PNGs) before writing conclusions.
+  (open the PNGs) before writing conclusions. If you can't view images,
+  work from `summary.json` and the chart texts in section 5 of `report.md`,
+  and tell the user you didn't see the charts themselves.
 - The findings are mechanical: severity means "could distort an analysis",
   not "matters for this user". Re-rank them against the user's goal.
 - In the generated `report.md` (never the dataset), replace the line

@@ -15,7 +15,7 @@ from report import ADVICE_ALIAS, CLEANING_ADVICE
 
 matplotlib.use("Agg")
 
-SKILL_DIR = Path(__file__).resolve().parents[1] / ".claude" / "skills" / "python-data-analyst"
+SKILL_DIR = Path(__file__).resolve().parents[1] / "skills" / "python-data-analyst"
 
 
 def _version(module) -> tuple[int, int]:
@@ -133,7 +133,7 @@ def test_palette_matches_the_scripts():
 
 
 def test_readme_local_links_and_images_exist():
-    root = SKILL_DIR.parents[2]
+    root = SKILL_DIR.parents[1]
     readme = (root / "README.md").read_text(encoding="utf-8")
     targets = re.findall(r"\]\(([^)#]+)\)", readme) + re.findall(r'src="([^"]+)"', readme)
     local = [t for t in targets if not t.startswith(("http://", "https://"))]

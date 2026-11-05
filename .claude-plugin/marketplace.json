@@ -1,0 +1,14 @@
+{
+  "name": "growingrui-data-skills",
+  "description": "Data analysis skills by GrowingRui",
+  "owner": {
+    "name": "GrowingRui"
+  },
+  "plugins": [
+    {
+      "name": "python-data-analyst",
+      "source": "./",
+      "description": "Careful exploratory data analysis of CSV and Excel files: quality checks, statistics, charts and a report. Never changes your data."
+    }
+  ]
+}

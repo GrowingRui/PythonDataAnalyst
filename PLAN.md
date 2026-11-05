@@ -12,7 +12,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 | # | Decision | Why |
 |---|---|---|
-| D1 | The skill lives in `.claude/skills/python-data-analyst/`. Tests, sample data, and the README sit at the repo root, outside the skill folder. | Anyone who installs the skill gets only what Claude needs. Contributors still get the tests. |
+| D1 | ~~The skill lives in `.claude/skills/python-data-analyst/`.~~ Replaced by D9 (the folder is now `skills/python-data-analyst/`). Tests, sample data, and the README sit at the repo root, outside the skill folder. | Anyone who installs the skill gets only what Claude needs. Contributors still get the tests. |
 | D2 | A local `.venv` with packages from `requirements.txt`. | Dependencies stay isolated and can be reproduced. |
 | D3 | Reports go to `./eda_output/<dataset>_<timestamp>/`, and `--output` overrides that. | The original dataset is never touched, and every run gets its own folder. |
 | D4 | Scripts output facts (JSON/Markdown), and Claude writes the conclusions. | The numbers come from tested code. The commentary fits each dataset. |
@@ -20,6 +20,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 | D6 | No extra dependencies beyond pandas, NumPy, Matplotlib, Seaborn, OpenPyXL and pytest. For example, we write our own Markdown table function so we don't need `tabulate`. | Easier for other people to install. |
 | D7 | Charts use one consistent, colorblind-checked palette: one color for single-series charts and a blue↔red diverging scale with a gray midpoint for correlations. Extended in Phase 6: a fixed 8-color order for unordered groups and a light→dark blue scale for ordered groups (`references/visualization-guide.md`). | Charts stay readable and look consistent. |
 | D8 | Personal use is optional. Users install the skill only in the projects where they want it. | You don't need it all the time. A skill costs only its one-line description until it's used. |
+| D9 | The skill lives in a neutral `skills/python-data-analyst/` folder (moved from `.claude/skills/` in Phase 9). The repo root is also a Claude Code plugin and marketplace (`.claude-plugin/`). | One copy works in every agent; Claude Code users install it as a plugin, others copy the folder. |
 
 ---
 
@@ -156,6 +157,38 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
+## Phase 9: Works in any agent, not only Claude Code ✅
+
+**Goal:** the skill installs and runs in any agent that supports the open Agent Skills format (agentskills.io), and still helps in agents that don't.
+
+What already works everywhere: the scripts are plain Python command-line tools, and the folder layout (`SKILL.md` + `scripts/` + `references/`) is the standard one. What only works in Claude Code:
+
+| Today | Problem in other agents | Change |
+|---|---|---|
+| `argument-hint` in the frontmatter | Not in the standard; strict validators may reject the file | Keep only standard fields (`name`, `description`, `license`, `compatibility`, `metadata`); add `compatibility: Python 3.11+ with pandas, NumPy, Matplotlib, Seaborn, OpenPyXL` |
+| `$ARGUMENTS` in SKILL.md | Only Claude Code fills it in; other agents see the literal text | Phrase step 1 as "the file and question from the user's request"; mention `$ARGUMENTS` only as a Claude Code extra |
+| `<skill-dir>` placeholder | Fine, but each agent finds its skill folder differently | Say "the folder that contains this SKILL.md" and give relative paths |
+| "Look at the charts (open the PNGs)" | Some agents can't view images | Add a fallback: rely on `summary.json` and the chart texts in `report.md`, and say the charts weren't viewed |
+| "Claude" in `report.py` and the docs | Wrong name in other agents | Neutral wording: "the agent" / "the analyst" |
+| Skill only in `.claude/skills/` | Other agents look in other folders (e.g. `.agents/skills/`) | See decision D9 below |
+| README install steps are Claude Code only | Other users don't know where to put it | An install table per agent, plus one generic "copy this folder" rule |
+
+Also:
+- `AGENTS.md` at the repo root for agents without skill support: a short pointer that tells them to read `SKILL.md` and follow it.
+- A test that checks `SKILL.md` against the standard (allowed fields, `name` matches the folder, description length), and the official validator in CI if it installs cleanly.
+- Hands-on trial in at least one other agent (same three checks as Phase 7: automatic trigger, manual request, negative check).
+
+**Decisions (approved 2026-11-05):**
+- **D9:** move to `skills/python-data-analyst/`, and also make the repo a Claude Code plugin, like the frontend-design skill.
+- **Agents to test:** only Claude Code is available. The second-agent trial is replaced by the official format validator (`skills-ref`) and a test that copies the bare skill folder elsewhere and runs it.
+
+**Done when:** SKILL.md passes the standard check, the plugin installs in Claude Code, and all tests pass.
+
+### Later candidates (not planned yet)
+A trial in a second agent when one is available; a cleaning script that applies approved steps and writes a change log; a time-trend chart for date columns; a `--target` option for group comparisons; repeatable trigger tests; Parquet/JSON input; plugin packaging.
+
+---
+
 ## Change log
 
 - 2026-11-04: Plan created. Phase 0 done. Phase 1 built: SKILL.md (129 lines, 412-char description) and folder skeleton.
@@ -169,3 +202,5 @@ We build this in small phases. Each phase ends with a review: you check the resu
 - 2026-11-05: Phase 6 approved, committed and pushed. Phase 7 built: `sample_data/make_sample_data.py` (seed 2025, 1,215 rows x 16 columns, answer key of 12 planted problems in its docstring) and the committed `sample_sales.csv`; `.gitattributes` keeps CSVs byte-identical across OSes. The demo review led to fixes: complete-row counts that ignore all-empty columns, numeric codes such as 999 among outliers reported as `possible_missing_code` (and no longer called "probably legitimate"), correlation titles that say when only the ranks agree, no "most common values" chart for dates stored as text, and the missing-values axis capped at 100%. `tests/test_sample_data.py` checks reproducibility and that every planted problem is found. 163 passing tests. Still open: the trigger tests in a new Claude Code session.
 - 2026-11-05: Phase 7 trigger tests done in Claude Code. Automatic trigger and `/python-data-analyst` both used the skill, left the input unchanged (SHA-256 verified) and proposed cleaning steps with costs without applying them; the full run added an Analyst interpretation (stating its assumed goal rather than asking). The unrelated question didn't load the skill.
 - 2026-11-05: Phase 7 committed and pushed. Phase 8 built: `README.md` (what it does, install per project or per user, usage, output, sample data, design, methods and limitations, development) with three chart images in `docs/images/`, `LICENSE` (MIT, © 2026 GrowingRui) and `.github/workflows/tests.yml`. Additions beyond the plan: a Windows test run, and a job that tests the oldest versions `requirements.txt` promises (pandas 2.1, NumPy 1.26, Matplotlib 3.8). Running those locally found a real difference: pandas 2 reports skewness 0 for a constant column, so `inspect_data.py` now decides that case itself; the guide examples, written for pandas 3 and Matplotlib 3.10+, are skipped on older versions. 164 passing tests (159 + 4 skipped on minimum versions). Approved, committed and pushed.
+- 2026-11-05: Phase 9 approved (D9: neutral `skills/` folder plus a Claude Code plugin; only Claude Code available for trials). Built: skill moved to `skills/python-data-analyst/`; SKILL.md frontmatter reduced to standard fields (`argument-hint` removed, `license`, `compatibility` and `metadata` added, version 1.1.0) and its text made agent-neutral (no `$ARGUMENTS`, a fallback for agents that can't view images); `.claude-plugin/plugin.json` and `marketplace.json` (marketplace `growingrui-data-skills`); `AGENTS.md`; README install section per agent; CI job `skill-format` running `skills-ref` and `claude plugin validate`; `tests/test_portability.py` (8 tests). Found and fixed on the way: SKILL.md told agents to `pip install -r requirements.txt`, a file that isn't part of an installed skill; it now lists the packages, and a test keeps them in step with `requirements.txt`. Checked: the official skill validator passes (it rejected `argument-hint` before the change), `claude plugin validate .` passes, the plugin installs into a throwaway Claude Code config and lists 1 skill (~110 tokens per session), and the EDA runs from the installed copy. 172 passing tests. Not tested: other agents and the third-party `npx skills` installer (blocked from running here).
+- 2026-11-05: Phase 9 approved, committed and pushed.

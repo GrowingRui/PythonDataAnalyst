@@ -1,16 +1,20 @@
-# Python Data Analyst: a Claude Code skill for exploratory data analysis
+# Python Data Analyst: an agent skill for exploratory data analysis
 
 [![tests](https://github.com/GrowingRui/PythonDataAnalyst/actions/workflows/tests.yml/badge.svg)](https://github.com/GrowingRui/PythonDataAnalyst/actions/workflows/tests.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-lightgrey.svg)](LICENSE)
 
-Ask Claude Code *"What's wrong with the data in sales.csv?"* and get a careful
+Ask your AI agent *"What's wrong with the data in sales.csv?"* and get a careful
 analyst's answer, backed by tested code: data quality problems, descriptive
 statistics, correlations, charts and a written report. Your file is never
 changed.
 
 The skill works on CSV, TSV and Excel files with pandas, NumPy, Matplotlib and
-Seaborn. Claude runs two scripts that compute every number, then reads the
+Seaborn. The agent runs two scripts that compute every number, then reads the
 results and the charts and writes the interpretation.
+
+It's written in the open [Agent Skills](https://agentskills.io/) format, so it
+works in Claude Code (as a plugin or a plain skill) and in other agents that
+support skills, such as OpenAI Codex, Gemini CLI, GitHub Copilot or Cursor.
 
 <p>
   <img src="docs/images/missing_values.png" alt="Bar chart of missing values per column" width="49%">
@@ -51,74 +55,98 @@ results and the charts and writes the interpretation.
 - **Writes a report:** `report.md` with ranked findings, cleaning options and
   what each one costs, suggested next steps and limitations. `summary.json`
   holds the same facts in machine-readable form.
-- **Never changes your data.** Problems are flagged, not fixed. Claude
+- **Never changes your data.** Problems are flagged, not fixed. The agent
   proposes cleaning steps with their consequences and waits for your
   approval; approved steps write a new file.
 
 ## Install
 
-You need [Claude Code](https://claude.com/claude-code), Python 3.11 or newer,
-and the packages in `requirements.txt` (pandas, NumPy, Matplotlib, Seaborn,
-openpyxl).
+You need Python 3.11 or newer with pandas, NumPy, Matplotlib, Seaborn and
+openpyxl, and an agent that can run shell commands.
 
-**1. Get the code.**
+### Claude Code: install as a plugin (recommended)
 
-```bash
-git clone https://github.com/GrowingRui/PythonDataAnalyst.git
+Inside Claude Code, run:
+
+```text
+/plugin marketplace add GrowingRui/PythonDataAnalyst
+/plugin install python-data-analyst@growingrui-data-skills
 ```
 
-**2. Install the skill** in one of two places:
+On Claude Code 2.1.275 or later, one line does both:
+`/plugin install python-data-analyst --marketplace GrowingRui/PythonDataAnalyst`.
+Updates arrive through `/plugin`, like any other plugin. Until it's used, the
+skill costs about 110 tokens per session (its one-line description).
 
-| Where | Folder | Available in |
+### Any agent: copy the skill folder
+
+The skill is the single folder `skills/python-data-analyst/`. Copy it into
+the folder where your agent looks for skills:
+
+| Agent | Project folder | User folder (all projects) |
 |---|---|---|
-| A project | `<your-project>/.claude/skills/python-data-analyst/` | That project only |
-| Your user profile | `~/.claude/skills/python-data-analyst/` | Every project |
-
-Install it per project if you only want it where you work with data. Until
-it's used, a skill costs Claude only its one-line description.
+| Claude Code (without the plugin) | `.claude/skills/` | `~/.claude/skills/` |
+| Agents that use the shared convention | `.agents/skills/` | `~/.agents/skills/` |
+| Any other agent | see its documentation for "skills" | |
 
 ```bash
 # macOS / Linux: install into a project
-mkdir -p /path/to/your-project/.claude/skills
-cp -r PythonDataAnalyst/.claude/skills/python-data-analyst /path/to/your-project/.claude/skills/
+git clone https://github.com/GrowingRui/PythonDataAnalyst.git
+mkdir -p /path/to/your-project/.agents/skills
+cp -r PythonDataAnalyst/skills/python-data-analyst /path/to/your-project/.agents/skills/
 ```
 
 ```powershell
 # Windows PowerShell: install for your user (all projects)
-New-Item -ItemType Directory -Force "$HOME\.claude\skills" | Out-Null
-Copy-Item -Recurse PythonDataAnalyst\.claude\skills\python-data-analyst "$HOME\.claude\skills\"
+git clone https://github.com/GrowingRui/PythonDataAnalyst.git
+New-Item -ItemType Directory -Force "$HOME\.agents\skills" | Out-Null
+Copy-Item -Recurse PythonDataAnalyst\skills\python-data-analyst "$HOME\.agents\skills\"
 ```
 
-**3. Install the Python packages** in the environment Claude will use. A
-project virtual environment (`.venv`) is picked up automatically.
+Skill folders differ between agents and change over time, so check your
+agent's documentation if the skill doesn't show up. The community
+[`skills` installer](https://github.com/vercel-labs/skills) can also copy it
+for many agents at once (`npx skills add GrowingRui/PythonDataAnalyst`); it's a
+third-party tool and isn't tested by this project.
+
+**No skill support?** Point the agent at `skills/python-data-analyst/SKILL.md`
+and ask it to follow it. Agents that read `AGENTS.md` do this by themselves
+inside this repository.
+
+### Python packages
+
+Install them in the environment the agent will use. A project virtual
+environment (`.venv`) is picked up automatically.
 
 ```bash
-pip install -r PythonDataAnalyst/requirements.txt
+pip install "pandas>=2.1" "numpy>=1.26" "matplotlib>=3.8" "seaborn>=0.13" "openpyxl>=3.1"
 ```
 
-If a package is missing, the skill tells Claude to ask you before installing
-anything.
+If a package is missing, the skill tells the agent to ask you before
+installing anything.
 
 ## Use it
 
-Start a new Claude Code session in your project and ask in plain language:
+Start a new agent session in your project and ask in plain language:
 
 - *"Explore `data/sales.csv` and tell me what stands out."*
 - *"Check `customers.xlsx` (sheet `2025`) for data quality problems."*
 - *"Which numeric columns in `survey.csv` have outliers, and should I remove them?"*
 
-Or call the skill by name, with an optional focus:
+Or call the skill by name, with an optional focus. In Claude Code that's
+`/python-data-analyst:python-data-analyst` when installed as a plugin, or
+`/python-data-analyst` when copied as a plain skill:
 
 ```text
-/python-data-analyst data/sales.csv focus on regional revenue differences
+/python-data-analyst:python-data-analyst data/sales.csv focus on regional revenue differences
 ```
 
-You can also run the scripts yourself, without Claude:
+You can also run the scripts yourself, without an agent:
 
 ```bash
-python .claude/skills/python-data-analyst/scripts/inspect_data.py data/sales.csv         # quick text summary
-python .claude/skills/python-data-analyst/scripts/inspect_data.py data/sales.csv --json  # the same as JSON
-python .claude/skills/python-data-analyst/scripts/generate_eda.py data/sales.csv         # full report + charts
+python skills/python-data-analyst/scripts/inspect_data.py data/sales.csv         # quick text summary
+python skills/python-data-analyst/scripts/inspect_data.py data/sales.csv --json  # the same as JSON
+python skills/python-data-analyst/scripts/generate_eda.py data/sales.csv         # full report + charts
 ```
 
 | Option | Script | Purpose |
@@ -151,7 +179,7 @@ eda_output/sales_20261105-092532/
 1. **Dataset overview**: file, size, column types
 2. **Data quality assessment**: missing values, duplicates, type problems, outliers
 3. **Descriptive statistics**: numeric, true/false, date and categorical columns
-4. **Key findings**: ranked rule-based findings, then Claude's *Analyst interpretation*
+4. **Key findings**: ranked rule-based findings, then the agent's *Analyst interpretation*
 5. **Visualization summaries**: one or two sentences per chart, with the chart
 6. **Suggested next steps**: cleaning options with their costs, further analysis
 7. **Limitations**: what the methods used can't tell you
@@ -176,17 +204,17 @@ after it, so the report itself shows that the data wasn't modified.
 can check what the skill finds against the answer key.
 
 ```bash
-python .claude/skills/python-data-analyst/scripts/generate_eda.py sample_data/sample_sales.csv --key order_id
+python skills/python-data-analyst/scripts/generate_eda.py sample_data/sample_sales.csv --key order_id
 ```
 
-Or, in Claude Code inside this repository: *"What's wrong with the data in
+Or ask your agent: *"What's wrong with the data in
 sample_data/sample_sales.csv?"*
 
 ## How it works
 
 ```text
-.claude/skills/python-data-analyst/
-├── SKILL.md                    # instructions Claude follows: workflow and rules
+skills/python-data-analyst/     # the whole skill: this folder is what gets installed
+├── SKILL.md                    # instructions the agent follows: workflow and rules
 ├── scripts/
 │   ├── inspect_data.py         # loading, column types, statistics, quality checks
 │   ├── generate_eda.py         # correlations, categories, charts; writes the output folder
@@ -199,14 +227,17 @@ sample_data/sample_sales.csv?"*
 
 The design follows a few rules:
 
-- **The scripts compute the facts and Claude interprets them.** Every number
-  comes from tested code, never from Claude estimating. The interpretation is
+- **The scripts compute the facts and the agent interprets them.** Every
+  number comes from tested code, never from the agent estimating. The interpretation is
   written for your goal and dataset.
 - **Read-only by default.** Removing outliers or filling gaps changes the
   results, so every cleaning step needs an explanation and your agreement.
-- **Progressive disclosure.** Claude reads `SKILL.md` when the skill is used,
+- **Progressive disclosure.** The agent reads `SKILL.md` when the skill is used,
   and the reference guides only when a question calls for them.
 - **Few dependencies.** Only pandas, NumPy, Matplotlib, Seaborn and openpyxl.
+- **Agent-neutral.** `SKILL.md` uses only the standard fields of the Agent
+  Skills format, and the folder works on its own after a plain copy. The
+  `.claude-plugin/` files only add the Claude Code plugin install.
 
 ## Methods and limitations
 
@@ -240,12 +271,20 @@ The test suite covers:
 - the charts and the report,
 - every Python example in the reference guides,
 - an end-to-end run on the sample data that must find every planted problem
-  and leave the input file byte-for-byte unchanged.
+  and leave the input file byte-for-byte unchanged,
+- the skill format: standard fields only, no agent-specific features, and a
+  copied skill folder that runs on its own.
+
+To use your working copy in Claude Code while you develop, add this repository
+as a local marketplace (`/plugin marketplace add ./`) and install the plugin
+from it; edits take effect after `/reload-plugins`.
 
 On every push, GitHub Actions runs the tests:
 - on Python 3.11 and 3.12 (Linux) and 3.12 (Windows),
-- and with the oldest supported versions (pandas 2.1, NumPy 1.26,
-  Matplotlib 3.8).
+- with the oldest supported versions (pandas 2.1, NumPy 1.26,
+  Matplotlib 3.8),
+- and through the official validators for the skill format (`skills-ref`) and
+  the Claude Code plugin (`claude plugin validate`).
 
 To change the sample data, edit `sample_data/make_sample_data.py`, run it,
 and commit the regenerated CSV. A test checks that the two match.

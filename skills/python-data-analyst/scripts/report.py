@@ -44,7 +44,7 @@ REPORT_SECTIONS = (
     "7. Limitations",
 )
 
-# Claude replaces this marker with an "Analyst interpretation" subsection.
+# The agent replaces this marker with an "Analyst interpretation" subsection.
 INTERPRETATION_MARKER = (
     "<!-- analyst-interpretation: the analyst adds an \"Analyst interpretation\" "
     "subsection here after reviewing the charts -->"
