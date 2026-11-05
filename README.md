@@ -66,7 +66,7 @@ openpyxl, and an agent that can run shell commands.
 
 ### Claude Code: install as a plugin (recommended)
 
-Inside Claude Code, run:
+In Claude Code in a terminal, run:
 
 ```text
 /plugin marketplace add GrowingRui/PythonDataAnalyst
@@ -77,6 +77,21 @@ On Claude Code 2.1.275 or later, one line does both:
 `/plugin install python-data-analyst --marketplace GrowingRui/PythonDataAnalyst`.
 Updates arrive through `/plugin`, like any other plugin. Until it's used, the
 skill costs about 110 tokens per session (its one-line description).
+
+**Using the VS Code extension?** `/plugin` isn't available in its chat
+("/plugin isn't available in this environment"). Install from a terminal
+instead. The extension shares the same settings, so the plugin shows up there
+in the next new chat:
+
+```bash
+claude plugin marketplace add GrowingRui/PythonDataAnalyst
+claude plugin install python-data-analyst@growingrui-data-skills
+```
+
+If `claude` isn't on your PATH, put `npx @anthropic-ai/claude-code` in front
+instead (for example `npx @anthropic-ai/claude-code plugin install ...`). To
+update or remove it later, use `claude plugin update` or
+`claude plugin uninstall` with the same name.
 
 ### Any agent: copy the skill folder
 
