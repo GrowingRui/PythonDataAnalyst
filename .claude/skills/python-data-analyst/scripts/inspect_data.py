@@ -1,8 +1,9 @@
-"""Load a CSV/TSV/Excel dataset and describe it (read-only).
+"""Load a CSV/TSV/Excel dataset, describe it and check its quality (read-only).
 
 Usage:
     python inspect_data.py data.csv
     python inspect_data.py data.xlsx --sheet "2025" --json
+    python inspect_data.py orders.csv --key order_id
 
 The input file is only ever read, never written.
 """
@@ -14,6 +15,8 @@ import csv
 import json
 import math
 import sys
+import warnings
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -38,6 +41,22 @@ TEXT_UNIQUE_RATIO = 0.5
 TEXT_MEAN_LENGTH = 50
 
 COLUMN_KINDS = ("numeric", "boolean", "datetime", "categorical", "text", "empty")
+
+# Placeholders that often mean "missing" but survive as text (compared after
+# stripping spaces and lower-casing). "" covers whitespace-only cells.
+DISGUISED_MISSING = frozenset(
+    {"", "-", "--", "---", "?", "??", ".", "n/a", "na", "nan", "null", "none", "nil",
+     "unknown", "missing", "not available", "#n/a", "tbd"}
+)
+# A text column is flagged as "numbers/dates stored as text" when at least this
+# share of its non-placeholder values parse as numbers/dates.
+TYPE_MATCH_RATIO = 0.8
+# IQR outliers: below IQR_MIN_VALUES the check is skipped; below
+# IQR_SMALL_SAMPLE the result carries a "small sample" note.
+IQR_MIN_VALUES = 5
+IQR_SMALL_SAMPLE = 20
+# Date detection parses each distinct value; above this many it uses a sample.
+DATE_SAMPLE_UNIQUE = 5000
 
 
 class DatasetError(ValueError):
@@ -330,7 +349,345 @@ def _categorical_stats(s: pd.Series, top_n: int, kind: str) -> dict[str, Any]:
     }
 
 
-def describe_dataset(df: pd.DataFrame, top_n: int = 5) -> dict[str, Any]:
+# --------------------------------------------------------------------------
+# Data quality (detects problems, never changes the data)
+# --------------------------------------------------------------------------
+
+
+def missing_values(df: pd.DataFrame, extra_tokens: Iterable[str] = ()) -> dict[str, Any]:
+    """Real missing values (NaN/None) and "disguised" ones such as "-" or "unknown".
+
+    pandas already turns "", "NA", "N/A", "null", "NaN", "None" etc. into NaN
+    while reading a CSV. Disguised values are the placeholders that survive as
+    ordinary text. They are counted separately and NOT included in "missing",
+    because whether "unknown" means missing is a decision for the analyst.
+    """
+    tokens = DISGUISED_MISSING | {t.strip().casefold() for t in extra_tokens}
+    n_rows = len(df)
+    columns = []
+    for name in df.columns:
+        s = df[name]
+        missing = int(s.isna().sum())
+        strings = _string_values(s)
+        disguised_mask = strings.str.strip().str.casefold().isin(tokens)
+        disguised = strings[disguised_mask]
+        columns.append(
+            {
+                "name": str(name),
+                "missing": missing,
+                "missing_pct": _pct(missing, n_rows),
+                "disguised": int(disguised.size),
+                "disguised_pct": _pct(disguised.size, n_rows),
+                "disguised_values": {repr(k): int(v) for k, v in disguised.value_counts().items()},
+            }
+        )
+    total_cells = int(df.size)
+    total_missing = int(df.isna().sum().sum())
+    return {
+        "total_cells": total_cells,
+        "total_missing": total_missing,
+        "total_missing_pct": _pct(total_missing, total_cells),
+        "total_disguised": sum(c["disguised"] for c in columns),
+        "rows_with_missing": int(df.isna().any(axis=1).sum()),
+        "rows_with_missing_pct": _pct(int(df.isna().any(axis=1).sum()), n_rows),
+        "complete_rows": int(df.notna().all(axis=1).sum()),
+        "columns": columns,
+    }
+
+
+def find_duplicates(df: pd.DataFrame, subset: list[str] | None = None, max_examples: int = 5) -> dict[str, Any]:
+    """Count duplicate rows, either fully identical or identical on key columns.
+
+    ``duplicate_rows`` counts the *extra* copies: three identical rows give 2,
+    because removing duplicates would keep one of them.
+    """
+    if subset:
+        unknown = [c for c in subset if c not in df.columns]
+        if unknown:
+            raise DatasetError(
+                f"Key column(s) not found: {', '.join(unknown)}. "
+                f"Available: {', '.join(map(str, df.columns))}"
+            )
+    extra = df.duplicated(subset=subset, keep="first")
+    involved = df.duplicated(subset=subset, keep=False)
+    groups = df[involved]
+    examples = []
+    if extra.any():
+        keys = subset or list(df.columns)
+        for _, grp in list(groups.groupby(keys, dropna=False, sort=False))[:max_examples]:
+            examples.append({"rows": [_index_label(i) for i in grp.index], "count": int(len(grp))})
+    return {
+        "subset": subset,
+        "mode": "key columns" if subset else "exact (all columns)",
+        "duplicate_rows": int(extra.sum()),
+        "duplicate_pct": _pct(int(extra.sum()), len(df)),
+        "rows_involved": int(involved.sum()),
+        "groups": int(groups.drop_duplicates(subset=subset).shape[0]),
+        "examples": examples,
+    }
+
+
+def detect_type_issues(
+    df: pd.DataFrame, kinds: dict[str, str] | None = None, max_examples: int = 5
+) -> list[dict[str, Any]]:
+    """Values stored with the wrong type, and inconsistent text labels.
+
+    Issue types:
+      numbers_as_text      most values are numbers, but the column is text
+      dates_as_text        most values are dates, but the column is text
+      mixed_types          one column holds several Python types (common in Excel)
+      inconsistent_labels  the same label written differently ("North" / "north ")
+      untrimmed_whitespace values with spaces at the start or end
+    """
+    kinds = kinds or classify_columns(df)
+    issues: list[dict[str, Any]] = []
+    for name in df.columns:
+        key = str(name)
+        s = df[name]
+        if kinds[key] not in ("categorical", "text"):
+            continue
+
+        mixed = _mixed_types(s)
+        if mixed:
+            issues.append(
+                {"column": key, "issue": "mixed_types", "count": int(s.notna().sum()),
+                 "detail": "Python types found: " + ", ".join(f"{t} {n}" for t, n in mixed.items()),
+                 "types": mixed}
+            )
+
+        strings = _string_values(s)
+        stripped = strings.str.strip()
+        candidates = stripped[~stripped.str.casefold().isin(DISGUISED_MISSING)]
+
+        numeric = _numeric_like(candidates, max_examples)
+        if numeric:
+            issues.append({"column": key, **numeric})
+        else:
+            dates = _date_like(candidates, max_examples)
+            if dates:
+                issues.append({"column": key, **dates})
+
+        labels = _inconsistent_labels(candidates, max_examples)
+        if labels:
+            issues.append({"column": key, **labels})
+
+        untrimmed = strings[(strings != stripped) & (stripped != "")]
+        if not untrimmed.empty:
+            issues.append(
+                {"column": key, "issue": "untrimmed_whitespace", "count": int(untrimmed.size),
+                 "detail": f"{untrimmed.size} value(s) have leading or trailing spaces",
+                 "examples": [repr(v) for v in untrimmed.unique()[:max_examples]]}
+            )
+    return issues
+
+
+def iqr_outliers(df: pd.DataFrame, kinds: dict[str, str] | None = None, k: float = 1.5) -> dict[str, dict[str, Any]]:
+    """Flag values outside [Q1 - k*IQR, Q3 + k*IQR] in each numeric column.
+
+    Values outside the fences are *unusual*, not necessarily *wrong*. In skewed
+    data (incomes, order values) many legitimate values fall outside them.
+    """
+    kinds = kinds or classify_columns(df)
+    result: dict[str, dict[str, Any]] = {}
+    for name in df.columns:
+        key = str(name)
+        if kinds[key] != "numeric":
+            continue
+        v = df[name].dropna().astype(float)
+        n = len(v)
+        if n < IQR_MIN_VALUES:
+            result[key] = {"status": "skipped", "count": n,
+                           "note": f"only {n} values; at least {IQR_MIN_VALUES} are needed for quartiles to mean anything"}
+            continue
+        q1, q3 = float(v.quantile(0.25)), float(v.quantile(0.75))
+        iqr = q3 - q1
+        if iqr == 0:
+            result[key] = {"status": "zero_iqr", "count": n, "q1": q1, "q3": q3, "iqr": 0.0,
+                           "values_not_equal_to_q1": int((v != q1).sum()),
+                           "note": "at least half the values are identical, so IQR is 0 and every other "
+                                   "value would be flagged; the IQR method doesn't apply here"}
+            continue
+        lower, upper = q1 - k * iqr, q3 + k * iqr
+        low, high = v[v < lower], v[v > upper]
+        entry = {
+            "status": "ok", "count": n, "q1": q1, "q3": q3, "iqr": iqr, "k": k,
+            "lower_fence": lower, "upper_fence": upper,
+            "n_low": int(low.size), "n_high": int(high.size),
+            "n_outliers": int(low.size + high.size), "outlier_pct": _pct(low.size + high.size, n),
+            "lowest_outliers": sorted(low.tolist())[:5], "highest_outliers": sorted(high.tolist())[-5:][::-1],
+        }
+        if n < IQR_SMALL_SAMPLE:
+            entry["note"] = f"small sample ({n} values): quartiles are unstable, treat flags as tentative"
+        result[key] = entry
+    return result
+
+
+def data_quality(df: pd.DataFrame, kinds: dict[str, str] | None = None,
+                 key_columns: list[str] | None = None) -> dict[str, Any]:
+    kinds = kinds or classify_columns(df)
+    quality = {
+        "missing": missing_values(df),
+        "duplicates": find_duplicates(df),
+        "type_issues": detect_type_issues(df, kinds),
+        "outliers": iqr_outliers(df, kinds),
+    }
+    if key_columns:
+        quality["key_duplicates"] = find_duplicates(df, subset=key_columns)
+    return quality
+
+
+# --- quality helpers -------------------------------------------------------
+
+
+def _string_values(s: pd.Series) -> pd.Series:
+    """Non-null values that are Python strings (other types in object columns are skipped)."""
+    non_null = s.dropna()
+    if pd.api.types.is_numeric_dtype(non_null) or pd.api.types.is_datetime64_any_dtype(non_null):
+        return pd.Series([], dtype=object)
+    if non_null.dtype != object:  # pandas string dtype: every value is a str
+        return non_null.astype(str)
+    mask = non_null.map(lambda v: isinstance(v, str)).astype(bool)
+    return non_null[mask].astype(str)
+
+
+def _mixed_types(s: pd.Series) -> dict[str, int] | None:
+    if s.dtype != object:
+        return None
+    types = s.dropna().map(lambda v: type(v).__name__).value_counts()
+    return {str(t): int(n) for t, n in types.items()} if len(types) > 1 else None
+
+
+def _numeric_like(values: pd.Series, max_examples: int) -> dict[str, Any] | None:
+    """Do most values parse as numbers once currency signs, % and separators are removed?"""
+    if values.empty:
+        return None
+    cleaned = values.str.replace(r"^[\$€£¥]\s*|\s*%$|\s", "", regex=True)
+    decimal_comma = bool(cleaned.str.contains(r"^[-+]?\d+,\d{1,2}$|\.\d{3},\d", regex=True).any())
+    if decimal_comma:
+        normalised = cleaned.str.replace(".", "", regex=False).str.replace(",", ".", regex=False)
+    else:
+        normalised = cleaned.str.replace(r"(?<=\d),(?=\d{3}\b)", "", regex=True)
+    parsed = pd.to_numeric(normalised, errors="coerce")
+    ok = int(parsed.notna().sum())
+    if ok == 0 or ok / len(values) < TYPE_MATCH_RATIO:
+        return None
+    failed = values[parsed.isna()]
+    notes = []
+    if decimal_comma:
+        notes.append("decimal comma (e.g. '120,5' = 120.5)")
+    if (cleaned != values.str.replace(r"\s", "", regex=True)).any():
+        notes.append("currency symbols or % signs")
+    if values.str.match(r"^0\d").any():
+        notes.append("leading zeros: may be a code (ID, postcode) that should stay text")
+    return {
+        "issue": "numbers_as_text",
+        "count": ok,
+        "detail": f"{ok} of {len(values)} text values ({_pct(ok, len(values))}%) parse as numbers"
+                  + (f"; {', '.join(notes)}" if notes else ""),
+        "non_numeric_examples": [repr(v) for v in failed.unique()[:max_examples]],
+        "decimal_comma": decimal_comma,
+    }
+
+
+def _date_like(values: pd.Series, max_examples: int) -> dict[str, Any] | None:
+    """Do most values parse as dates? Values without a digit are never treated as dates.
+
+    Flexible date parsing is slow, so each distinct value is parsed once, and
+    columns with more than DATE_SAMPLE_UNIQUE distinct values are judged on a
+    fixed random sample of them (the result says so).
+    """
+    if values.empty:
+        return None
+    counts = values.value_counts()
+    sampled = len(counts) > DATE_SAMPLE_UNIQUE
+    if sampled:
+        counts = counts.sample(DATE_SAMPLE_UNIQUE, random_state=0)
+    uniques = counts.index.to_series(index=counts.index)
+    parsed = pd.Series(pd.NaT, index=counts.index, dtype="datetime64[ns]")
+    has_digit = uniques.str.contains(r"\d", regex=True)
+    if has_digit.any():
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            parsed[has_digit] = pd.to_datetime(uniques[has_digit], errors="coerce", format="mixed")
+    checked = int(counts.sum())
+    share = int(counts[parsed.notna()].sum()) / checked
+    if share == 0 or share < TYPE_MATCH_RATIO:
+        return None
+    ok = round(share * len(values))
+    order = _day_month_order(uniques)
+    if sampled:
+        detail = (f"about {ok} of {len(values)} text values ({_pct(share, 1)}%) parse as dates "
+                  f"(estimated from a sample of {DATE_SAMPLE_UNIQUE} distinct values)")
+    else:
+        detail = f"{ok} of {len(values)} text values ({_pct(share, 1)}%) parse as dates"
+    if order == "ambiguous":
+        detail += "; day/month order is ambiguous (e.g. 03/04 could be 3 April or 4 March)"
+    elif order == "inconsistent":
+        detail += "; some values are clearly day-first and others month-first"
+    elif order:
+        detail += f"; values look {order}"
+    return {
+        "issue": "dates_as_text",
+        "count": ok,
+        "detail": detail,
+        "non_date_examples": [repr(v) for v in uniques[parsed.isna()].head(max_examples)],
+        "date_order": order,
+        "sampled": sampled,
+    }
+
+
+def _day_month_order(values: pd.Series) -> str | None:
+    """For dates like 03/04/2025: which part is the day? Decided by any part > 12."""
+    parts = values.str.extract(r"^(\d{1,2})[/.\-](\d{1,2})[/.\-]\d{2,4}").dropna().astype(int)
+    if parts.empty:
+        return None
+    day_first, month_first = (parts[0] > 12).any(), (parts[1] > 12).any()
+    if day_first and month_first:
+        return "inconsistent"
+    if day_first:
+        return "day-first"
+    if month_first:
+        return "month-first"
+    return "ambiguous"
+
+
+def _inconsistent_labels(values: pd.Series, max_examples: int) -> dict[str, Any] | None:
+    """Group labels that differ only in case or inner spacing ("North", "north", "North  East").
+
+    ``values`` are already stripped; untrimmed values are reported separately.
+    """
+    if values.empty:
+        return None
+    counts = values.value_counts()
+    table = pd.DataFrame({
+        "value": counts.index.astype(str),
+        "count": counts.to_numpy(),
+        "norm": counts.index.str.casefold().str.replace(r"\s+", " ", regex=True),
+    })
+    table = table[table.groupby("norm")["value"].transform("size") > 1]
+    if table.empty:
+        return None
+    groups = [
+        [{"value": v, "count": int(c)} for v, c in zip(g["value"], g["count"])]
+        for _, g in table.groupby("norm", sort=False)
+    ]
+    return {
+        "issue": "inconsistent_labels",
+        "count": int(table["count"].sum()),
+        "detail": f"{len(groups)} label(s) are written in more than one way (case or spacing)",
+        "groups": groups[:max_examples],
+    }
+
+
+def _index_label(i: Any) -> Any:
+    return int(i) if isinstance(i, (int, np.integer)) else str(i)
+
+
+def _pct(part: float, whole: float) -> float:
+    return round(100 * part / whole, 2) if whole else 0.0
+
+
+def describe_dataset(df: pd.DataFrame, top_n: int = 5, key_columns: list[str] | None = None) -> dict[str, Any]:
     """Everything this script reports, as one JSON-ready dict."""
     kinds = classify_columns(df)
     stats = descriptive_stats(df, kinds, top_n)
@@ -339,6 +696,7 @@ def describe_dataset(df: pd.DataFrame, top_n: int = 5) -> dict[str, Any]:
             "source": df.attrs.get("source", {}),
             "overview": get_overview(df, kinds),
             "statistics": stats,
+            "quality": data_quality(df, kinds, key_columns),
         }
     )
 
@@ -385,7 +743,7 @@ def _fmt(x: Any) -> str:
     if x is None:
         return "-"
     if isinstance(x, float):
-        return f"{x:,.4g}" if abs(x) < 1e6 else f"{x:,.0f}"
+        return f"{x:,.4g}" if abs(x) < 1e4 else f"{x:,.0f}"
     return str(x)
 
 
@@ -460,7 +818,59 @@ def format_text(result: dict[str, Any]) -> str:
     empty = [k for k, v in st.items() if v["kind"] == "empty"]
     if empty:
         out += ["", f"EMPTY COLUMNS (all values missing): {', '.join(empty)}"]
+
+    if "quality" in result:
+        out += ["", *_format_quality(result["quality"])]
     return "\n".join(out)
+
+
+def _format_quality(q: dict[str, Any]) -> list[str]:
+    out = ["DATA QUALITY"]
+
+    m = q["missing"]
+    out.append(
+        f"Missing: {m['total_missing']:,} of {m['total_cells']:,} cells ({m['total_missing_pct']}%); "
+        f"{m['rows_with_missing']:,} rows ({m['rows_with_missing_pct']}%) have at least one gap"
+    )
+    rows = [[c["name"], c["missing"], c["missing_pct"], c["disguised"],
+             ", ".join(f"{k} x{v}" for k, v in c["disguised_values"].items()) or "-"]
+            for c in m["columns"] if c["missing"] or c["disguised"]]
+    if rows:
+        out.append(_table(["column", "missing", "missing %", "disguised", "disguised values"], rows))
+
+    for label, d in (("Duplicates", q["duplicates"]), ("Key duplicates", q.get("key_duplicates"))):
+        if d is None:
+            continue
+        what = "all columns" if not d["subset"] else f"on {', '.join(d['subset'])}"
+        line = f"{label} ({what}): {d['duplicate_rows']:,} extra rows ({d['duplicate_pct']}%)"
+        if d["examples"]:
+            line += "; e.g. rows " + "; ".join(", ".join(map(str, e["rows"])) for e in d["examples"][:3])
+        out.append(line)
+
+    out.append("Type issues:" + ("" if q["type_issues"] else " none found"))
+    for i in q["type_issues"]:
+        if i.get("groups"):
+            extra = "; ".join(" / ".join(f"{v['value']!r} x{v['count']}" for v in g) for g in i["groups"])
+        else:
+            extra = ", ".join(i.get("non_numeric_examples") or i.get("non_date_examples") or i.get("examples") or [])
+        label = {"numbers_as_text": "not numbers", "dates_as_text": "not dates"}.get(i["issue"], "examples")
+        out.append(f"  * {i['column']}: {i['issue']}. {i['detail']}" + (f". {label.capitalize()}: {extra}" if extra else ""))
+
+    out.append("IQR outliers (values outside Q1 - 1.5*IQR .. Q3 + 1.5*IQR):")
+    for col, o in q["outliers"].items():
+        if o["status"] != "ok":
+            out.append(f"  * {col}: {o['status']}. {o['note']}")
+            continue
+        line = (f"  * {col}: {o['n_outliers']} ({o['outlier_pct']}%), {o['n_low']} low / {o['n_high']} high; "
+                f"fences {_fmt(o['lower_fence'])} .. {_fmt(o['upper_fence'])}")
+        if o["highest_outliers"]:
+            line += f"; highest {', '.join(_fmt(v) for v in o['highest_outliers'])}"
+        if o.get("note"):
+            line += f" ({o['note']})"
+        out.append(line)
+    if not q["outliers"]:
+        out.append("  (no numeric columns)")
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -475,6 +885,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--encoding", help="text encoding for CSV files (default: try utf-8, then cp1252)")
     p.add_argument("--delimiter", help="CSV delimiter (default: detected automatically)")
     p.add_argument("--top", type=int, default=5, help="top values shown per categorical column (default 5)")
+    p.add_argument("--key", help="comma-separated key columns for an extra duplicate check, e.g. order_id")
     p.add_argument("--json", action="store_true", help="print JSON instead of text")
     return p
 
@@ -490,11 +901,12 @@ def main(argv: list[str] | None = None) -> int:
     delimiter = args.delimiter.encode().decode("unicode_escape") if args.delimiter else None  # allow "\t"
     try:
         df = load_dataset(args.path, sheet=args.sheet, encoding=args.encoding, delimiter=delimiter)
+        keys = [k.strip() for k in args.key.split(",")] if args.key else None
+        result = describe_dataset(df, top_n=args.top, key_columns=keys)
     except DatasetError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
 
-    result = describe_dataset(df, top_n=args.top)
     if args.json:
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:

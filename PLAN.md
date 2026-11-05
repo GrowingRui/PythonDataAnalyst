@@ -53,7 +53,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
-## Phase 2: `inspect_data.py`, loading and overview 🟡 (built, waiting for your review)
+## Phase 2: `inspect_data.py`, loading and overview ✅
 
 **Goal:** read any CSV or Excel file robustly and describe it.
 
@@ -71,7 +71,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
-## Phase 3: `inspect_data.py`, data quality ⬜
+## Phase 3: `inspect_data.py`, data quality ✅
 
 **Goal:** detect problems without changing anything.
 
@@ -159,3 +159,5 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 - 2026-11-04: Plan created. Phase 0 done. Phase 1 built: SKILL.md (129 lines, 412-char description) and folder skeleton.
 - 2026-11-05: Phase 1 approved. Phase 2 built: `inspect_data.py` (load, classify, overview, stats, CLI) and 37 passing tests. Additions beyond the plan: an `empty` column kind for all-missing columns, `--encoding`/`--delimiter`/`--top` options, and a `skew_label` rule of thumb. `.xls` is rejected with instructions to re-save as `.xlsx`.
+- 2026-11-05: Phase 2 approved, committed and pushed. Phase 0-1 gaps filled: `.claude/settings.local.json` ignored, `pytest.ini` added, SKILL.md documents the inspect options.
+- 2026-11-05: Phase 3 built: `missing_values`, `find_duplicates`, `detect_type_issues`, `iqr_outliers`, `data_quality`, `--key` option, 71 passing tests. Additions beyond the plan: `untrimmed_whitespace` as its own issue, day/month order detection for text dates, currency/%/decimal-comma handling for numbers-as-text, and sampling for date detection on columns with more than 5,000 distinct values.

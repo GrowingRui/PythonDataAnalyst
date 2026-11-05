@@ -253,7 +253,7 @@ def test_describe_dataset_is_json_serialisable(mixed_df):
     result = describe_dataset(mixed_df)
     text = json.dumps(result)  # raises if numpy types or NaN slipped through
     assert "NaN" not in text
-    assert set(result) == {"source", "overview", "statistics"}
+    assert set(result) == {"source", "overview", "statistics", "quality"}
 
 
 # --------------------------------------------------------------------------

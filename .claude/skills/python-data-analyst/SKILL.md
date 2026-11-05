@@ -65,6 +65,8 @@ in plain language. Don't paste raw JSON.
 If the file doesn't load cleanly, the error message says why. Useful options:
 `--sheet NAME` (Excel), `--encoding ENC` (e.g. `latin-1` when UTF-8 and
 cp1252 both fail), `--delimiter ";"` (when detection guesses wrong).
+Add `--key order_id` (comma-separated for several columns) to also check
+for duplicate keys, i.e. rows that share an ID but differ elsewhere.
 Always mention the encoding and delimiter the script used if they weren't
 UTF-8 and a comma.
 
