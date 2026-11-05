@@ -87,7 +87,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
 
 ---
 
-## Phase 4: `generate_eda.py`, analysis and charts ⬜
+## Phase 4: `generate_eda.py`, analysis and charts ✅
 
 **Goal:** go deeper than inspection and visualise the data.
 
@@ -100,6 +100,7 @@ We build this in small phases. Each phase ends with a review: you check the resu
   - top-category bar charts
   - correlation heatmap
   - scatter plots for the 3 most correlated pairs
+  - log-scale histogram for highly right-skewed, all-positive columns that span at least 20×
 - Limits for large or wide data: `--max-categories`, `--max-scatter-points`, a cap on the number of charts
 - Tests: chart files are created, and edge cases (no numeric columns, a single column) don't crash
 
@@ -161,3 +162,5 @@ We build this in small phases. Each phase ends with a review: you check the resu
 - 2026-11-05: Phase 1 approved. Phase 2 built: `inspect_data.py` (load, classify, overview, stats, CLI) and 37 passing tests. Additions beyond the plan: an `empty` column kind for all-missing columns, `--encoding`/`--delimiter`/`--top` options, and a `skew_label` rule of thumb. `.xls` is rejected with instructions to re-save as `.xlsx`.
 - 2026-11-05: Phase 2 approved, committed and pushed. Phase 0-1 gaps filled: `.claude/settings.local.json` ignored, `pytest.ini` added, SKILL.md documents the inspect options.
 - 2026-11-05: Phase 3 built: `missing_values`, `find_duplicates`, `detect_type_issues`, `iqr_outliers`, `data_quality`, `--key` option, 71 passing tests. Additions beyond the plan: `untrimmed_whitespace` as its own issue, day/month order detection for text dates, currency/%/decimal-comma handling for numbers-as-text, and sampling for date detection on columns with more than 5,000 distinct values.
+- 2026-11-05: Phase 3 approved, committed and pushed. Phase 4 built: `generate_eda.py` (correlations, categorical summary, 5 chart types, `--max-categories`/`--max-scatter-points`/`--max-charts`, writes `summary.json`), 97 passing tests. Additions beyond the plan: likely-ID columns are excluded from charts and correlations, Pearson-vs-Spearman gap and low-n notes on each pair, the output folder must be new or empty (never overwrites). Histogram and box plot share one PNG per column.
+- 2026-11-05: Phase 4 approved with one addition: a log-scale histogram for highly skewed positive columns. 99 passing tests. Committed and pushed.

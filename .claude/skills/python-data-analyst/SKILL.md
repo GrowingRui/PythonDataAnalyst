@@ -84,6 +84,12 @@ This creates `eda_output/<dataset>_<timestamp>/` containing `report.md`,
 | `--output DIR` | Write results to a different folder |
 | `--max-categories N` | Top-N categories shown per categorical column |
 | `--max-scatter-points N` | Sample size for scatter plots on large data |
+| `--max-charts N` | Cap on the number of charts (default 40); skipped charts are listed in `summary.json` |
+| `--key COLS` | Key columns for the duplicate-key check, e.g. `order_id` |
+
+Columns that look like row IDs (`order_id`, `customerID`, or a 1, 2, 3, ...
+counter) are left out of charts and correlations; `summary.json` lists them
+under `analysis.excluded_id_columns`. Mention this if the user expected them.
 
 ### Step 5: Interpret
 - Read `summary.json` and **look at the charts** (open the PNGs) before
