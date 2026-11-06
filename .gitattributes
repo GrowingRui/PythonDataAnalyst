@@ -7,3 +7,4 @@ evals/**/case.yaml text eol=lf
 *.xlsx binary
 *.parquet binary
 *.jsonl text eol=lf
+*.png binary

@@ -306,7 +306,7 @@ Order: trigger tests come first, because every later phase changes `SKILL.md`, a
 
 ---
 
-## Phase 15: Reliable triggering, cleaning included 🟡
+## Phase 15: Reliable triggering, cleaning included ✅
 
 **Goal:** the skill loads whenever someone asks for what it does, including the cleaning added in Phase 14, and stays out of the way for near misses. People who don't know the skill is installed only benefit if it triggers on its own.
 
@@ -377,3 +377,4 @@ About $15 in total, but no stage takes more than about $4.5. Concurrency (`-j`) 
 - 2026-11-06: Stage D1 again on the stage C description (should trigger, 3 runs each): 19 of 19 cases, 57 of 57 runs, no misses, target met; $5.83, 6.3 min (`evals/results/2026-11-06-2147-triggers.md`). 381 tests pass, the skill validator (`skills-ref` 0.1.1) and `claude plugin validate` (2.1.319) pass, the latter with one new directory warning (no plugin icon) that doesn't change the result. Version 1.6.0. Phase 15 done criteria met, waiting for review; afterwards the user updates the installed plugin (still 1.1.0).
 - 2026-11-06: Phase 15 approved.
 - 2026-11-06: Pushed (90df491). Installed plugin updated from 1.1.0 to 1.6.0 (user scope) via `claude plugin update`; takes effect after a Claude Code restart. Phase 15 closed.
+- 2026-11-06: Housekeeping (no phase, no version change): Phase 15 heading marked done; plugin icon added at `.claude-plugin/icon.png` (1024 x 1024 PNG drawn with Matplotlib: three bars and an amber magnifying glass on dark teal), so `claude plugin validate` no longer warns about a missing icon. `plugin.json` is unchanged because the validator finds that path by default. 381 tests pass.
